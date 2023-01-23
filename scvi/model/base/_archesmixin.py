@@ -161,9 +161,8 @@ class ArchesMixin:
             model.module.use_vampprior = True
             model.module.number_vp_components = number_vp_components
             model.module.add_pseudoinputs(model.module.n_input)
-        
-        ### regenerate the summary string
-        model._model_summary_string = model._model_summary_string.replace("use_VamPprior: False","use_VamPprior: True")
+            ### regenerate the summary string
+            model._model_summary_string = model._model_summary_string.replace("use_VamPprior: False","use_VamPprior: True")
             
         return model
 
