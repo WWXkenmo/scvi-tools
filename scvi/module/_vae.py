@@ -450,15 +450,18 @@ class VAE(BaseLatentModeModuleClass):
         
         ###### fix, add VampPrior
         if self.use_vampprior:
+            device = z.device
             if cat_covs is not None:
-                cat_covs_zero = torch.zeros_like(cat_covs)-1
-                if self.encode_covariates:
-                    categorical_input = torch.split(cat_covs_zero, 1, dim=1) ## 按列分割，组合成tuple对象
+            cat_covs_zero = torch.zeros([self.number_vp_components,cat_covs.shape[1]])-1
+            cat_covs_zero = cat_covs_zero.to(device)
+            if self.encode_covariates:
+                categorical_input = torch.split(cat_covs_zero, 1, dim=1) ## 按列分割，组合成tuple对象
             else:
                 categorical_input = tuple()
             ## convert input batch_index and categorical_input all equal to zero
-            batch_index_zero = torch.zeros_like(batch_index)-1
-            q = self.z_encoder.encoder(self.means(self.idle_input), batch_index_zero, *categorical_input) ## encode distribution of z and z
+            batch_index_zero = torch.zeros([self.number_vp_components,1])-1
+            batch_index_zero = batch_index_zero.to(device)
+            q = self.z_encoder.encoder(self.means(self.idle_input).to(device), batch_index_zero, *categorical_input) ## encode distribution of z and z
             
             ## get location parameter
             z_p_mean = self.z_encoder.mean_encoder(q)
