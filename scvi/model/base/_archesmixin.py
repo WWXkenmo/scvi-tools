@@ -107,7 +107,7 @@ class ArchesMixin:
         )
         
         ## set prior equal to vampprior
-        attr_dict['init_params_']['non_kwargs']['use_vampprior'] = True
+        #attr_dict['init_params_']['non_kwargs']['use_vampprior'] = True
         
         model = _initialize_model(cls, adata, attr_dict)
         adata_manager = model.get_anndata_manager(adata, required=True)
