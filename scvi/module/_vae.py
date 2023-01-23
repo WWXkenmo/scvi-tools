@@ -343,8 +343,16 @@ class VAE(BaseLatentModeModuleClass):
                 )
             else:
                 library = ql.sample((n_samples,))
-        outputs = dict(z=z, qz=qz, ql=ql, library=library)
-        return outputs
+        
+        if self.use_vampprior:
+            q = self.z_encoder.encoder(encoder_input, batch_index, *categorical_input)
+            z_q_mean = self.z_encoder.mean_encoder(q)
+            z_q_logvar = self.z_encoder.var_encoder(q)
+            z = reparameterize(z_q_mean,z_q_logvar)
+            i_outputs = dict(z=z, qz=qz, ql=ql, library=library,z_q_mean = z_q_mean,z_q_logvar = z_q_logvar)
+        else:
+            i_outputs = dict(z=z, qz=qz, ql=ql, library=library) ## 当n_sample > 1的时候，此时z和library都是从q分布中sample出来的，且z进行了z-score transformation
+        return i_outputs
 
     @auto_move_data
     def _cached_inference(self, qzm, qzv, observed_lib_size, n_samples=1):
@@ -439,12 +447,61 @@ class VAE(BaseLatentModeModuleClass):
                 local_library_log_vars,
             ) = self._compute_local_library_params(batch_index)
             pl = Normal(local_library_log_means, local_library_log_vars.sqrt())
-        pz = Normal(torch.zeros_like(z), torch.ones_like(z))
-        return dict(
+        
+        ###### fix, add VampPrior
+        if self.use_vampprior:
+            if cat_covs is not None:
+                cat_covs_zero = torch.zeros_like(cat_covs)-1
+                if self.encode_covariates:
+                    categorical_input = torch.split(cat_covs_zero, 1, dim=1) ## 按列分割，组合成tuple对象
+            else:
+                categorical_input = tuple()
+            ## convert input batch_index and categorical_input all equal to zero
+            batch_index_zero = torch.zeros_like(batch_index)-1
+            q = self.z_encoder.encoder(self.means(self.idle_input), batch_index_zero, *categorical_input) ## encode distribution of z and z
+            
+            ## get location parameter
+            z_p_mean = self.z_encoder.mean_encoder(q)
+            z_p_logvar = self.z_encoder.var_encoder(q)
+            g_outputs = dict(
+            px=px,
+            pl=pl,
+            z_p_mean = z_p_mean,
+            z_p_logvar = z_p_logvar,
+            )
+        else:
+            pz = Normal(torch.zeros_like(z), torch.ones_like(z)) ## 这里的prior是standard multivariate distribution，需要改成VampPrior的部分   
+            g_outputs = dict(
             px=px,
             pl=pl,
             pz=pz,
-        )
+            ) 
+        ##########################
+
+        return g_outputs
+
+    def vp_kl(self,inference_outputs, generative_outputs):
+        z = inference_outputs["z"]
+        z_q_mean = inference_outputs["z_q_mean"]
+        z_q_logvar = inference_outputs["z_q_logvar"]
+        z_p_mean = generative_outputs["z_p_mean"]
+        z_p_logvar = generative_outputs["z_p_logvar"]
+        
+        log_q_z = log_Normal_diag(z, z_q_mean, z_q_logvar, dim=1)
+
+        z_expand = z.unsqueeze(1)
+        means = z_p_mean.unsqueeze(0)
+        logvars = z_p_logvar.unsqueeze(0)
+
+        a = log_Normal_diag(z_expand, means, logvars, dim=2) - math.log(self.number_vp_components)  # MB x C
+        a_max, _ = torch.max(a, 1)  # MB x 1
+
+        # calculte log-sum-exp
+        log_p_z = a_max + torch.log(torch.sum(torch.exp(a - a_max.unsqueeze(1)), 1))  # MB x 1
+        
+        KL = -(log_p_z - log_q_z)
+
+        return KL
 
     def loss(
         self,
@@ -455,9 +512,14 @@ class VAE(BaseLatentModeModuleClass):
     ):
         """Computes the loss function for the model."""
         x = tensors[REGISTRY_KEYS.X_KEY]
-        kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(
-            dim=1
-        )
+        
+        if self.vampprior:
+            kl_divergence_z = self.vp_kl(inference_outputs, generative_outputs)
+        else:
+            kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(
+                dim=1
+                )
+    
         if not self.use_observed_lib_size:
             kl_divergence_l = kl(
                 inference_outputs["ql"],
