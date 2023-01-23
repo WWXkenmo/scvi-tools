@@ -1,5 +1,6 @@
 from torch.autograd import Variable
 import math
+import torch
 
 def reparameterize(mu, logvar):
     std = logvar.mul(0.5).exp_()
