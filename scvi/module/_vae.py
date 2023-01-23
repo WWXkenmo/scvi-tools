@@ -1,5 +1,5 @@
 """Main module."""
-from typing import Callable, Iterable, Optional, Literal
+from typing import Callable, Iterable, Literal, Optional
 
 import numpy as np
 import torch
@@ -10,17 +10,17 @@ from torch.distributions import kl_divergence as kl
 from torch.autograd import Variable
 
 from scvi import REGISTRY_KEYS
-from scvi._compat import Literal
-from scvi._types import LatentDataType
+from scvi.autotune._types import Tunable
 from scvi.distributions import NegativeBinomial, Poisson, ZeroInflatedNegativeBinomial
 from scvi.module.base import BaseLatentModeModuleClass, LossOutput, auto_move_data
 from scvi.nn import DecoderSCVI, Encoder, LinearDecoderSCVI, one_hot, FCLayers
-#from scvi.utils import add_pseudoinputs
 from scvi.utils import reparameterize, log_Normal_diag 
 
 torch.backends.cudnn.benchmark = True
 
-# VAE model
+_SCVI_LATENT_MODE = "posterior_parameters"
+
+
 class VAE(BaseLatentModeModuleClass):
     """
     Variational auto-encoder model.
@@ -72,8 +72,10 @@ class VAE(BaseLatentModeModuleClass):
     deeply_inject_covariates
         Whether to concatenate covariates into output of hidden layers in encoder/decoder. This option
         only applies when `n_layers` > 1. The covariates are concatenated to the input of subsequent hidden layers.
+    use_batch_norm
+        Whether to use batch norm in layers.
     use_layer_norm
-        Whether to use layer norm in layers
+        Whether to use layer norm in layers.
     use_size_factor_key
         Use size_factor AnnDataField defined by the user as scaling factor in mean of conditional distribution.
         Takes priority over `use_observed_lib_size`.
@@ -97,30 +99,31 @@ class VAE(BaseLatentModeModuleClass):
         n_input: int,
         n_batch: int = 0,
         n_labels: int = 0,
-        n_hidden: int = 128,
-        n_latent: int = 10,
-        n_layers: int = 1,
+        n_hidden: Tunable[int] = 128,
+        n_latent: Tunable[int] = 10,
+        n_layers: Tunable[int] = 1,
         n_continuous_cov: int = 0,
         n_cats_per_cov: Optional[Iterable[int]] = None,
-        dropout_rate: float = 0.1,
-        dispersion: str = "gene",
+        dropout_rate: Tunable[float] = 0.1,
+        dispersion: Tunable[
+            Literal["gene", "gene-batch", "gene-label", "gene-cell"]
+        ] = "gene",
         log_variational: bool = True,
-        gene_likelihood: Literal["zinb", "nb", "poisson"] = "zinb",
-        latent_distribution: str = "normal",
-        encode_covariates: bool = False,
-        deeply_inject_covariates: bool = True,
-        use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
-        use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
+        gene_likelihood: Tunable[Literal["zinb", "nb", "poisson"]] = "zinb",
+        latent_distribution: Tunable[Literal["normal", "ln"]] = "normal",
+        encode_covariates: Tunable[bool] = False,
+        deeply_inject_covariates: Tunable[bool] = True,
+        use_batch_norm: Tunable[Literal["encoder", "decoder", "none", "both"]] = "both",
+        use_layer_norm: Tunable[Literal["encoder", "decoder", "none", "both"]] = "none",
         use_size_factor_key: bool = False,
         use_observed_lib_size: bool = True,
         library_log_means: Optional[np.ndarray] = None,
         library_log_vars: Optional[np.ndarray] = None,
         var_activation: Optional[Callable] = None,
-        latent_data_type: Optional[LatentDataType] = None,
         use_vampprior: bool = False,
         number_vp_components: Tunable[int] = 10,
     ):
-        super().__init__()  ### 将各个side-information设定给self
+        super().__init__()
         self.dispersion = dispersion
         self.n_latent = n_latent
         self.log_variational = log_variational
@@ -130,7 +133,6 @@ class VAE(BaseLatentModeModuleClass):
         self.n_labels = n_labels
         self.latent_distribution = latent_distribution
         self.encode_covariates = encode_covariates
-        self._latent_data_type = latent_data_type
 
         self.use_size_factor_key = use_size_factor_key
         self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
@@ -139,16 +141,16 @@ class VAE(BaseLatentModeModuleClass):
                 raise ValueError(
                     "If not using observed_lib_size, "
                     "must provide library_log_means and library_log_vars."
-                ) # raise类似writeLines
+                )
 
             self.register_buffer(
                 "library_log_means", torch.from_numpy(library_log_means).float()
             )
             self.register_buffer(
                 "library_log_vars", torch.from_numpy(library_log_vars).float()
-            )  ## register_buffer 也是用来存储参数但不会被 optim.step 更新 (主要更新nn.params)
+            )
 
-        if self.dispersion == "gene": ## 如何encode gene specific dispersion参数
+        if self.dispersion == "gene":
             self.px_r = torch.nn.Parameter(torch.randn(n_input))
         elif self.dispersion == "gene-batch":
             self.px_r = torch.nn.Parameter(torch.randn(n_input, n_batch))
@@ -163,7 +165,6 @@ class VAE(BaseLatentModeModuleClass):
                 "{}.format(self.dispersion)"
             )
 
-        ## encoder和decoder如何进行batch normalization
         use_batch_norm_encoder = use_batch_norm == "encoder" or use_batch_norm == "both"
         use_batch_norm_decoder = use_batch_norm == "decoder" or use_batch_norm == "both"
         use_layer_norm_encoder = use_layer_norm == "encoder" or use_layer_norm == "both"
@@ -171,16 +172,9 @@ class VAE(BaseLatentModeModuleClass):
 
         # z encoder goes from the n_input-dimensional data to an n_latent-d
         # latent space representation
-        ## 将covariable 和表达合并，统计input feature的数量
-        n_input_encoder = n_input + n_continuous_cov * encode_covariates 
-
-        ## 统计category variable的数量, list output
+        n_input_encoder = n_input + n_continuous_cov * encode_covariates
         cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
-
-        
         encoder_cat_list = cat_list if encode_covariates else None
-
-        ## 对observed [features + covariables] encode成latent z
         self.z_encoder = Encoder(
             n_input_encoder,
             n_latent,
@@ -195,8 +189,6 @@ class VAE(BaseLatentModeModuleClass):
             var_activation=var_activation,
             return_dist=True,
         )
-
-        ## 对observed [features + covariables] encode成latent l (encoder for library size)
         # l encoder goes from n_input-dimensional data to 1-d library size
         self.l_encoder = Encoder(
             n_input_encoder,
@@ -212,8 +204,6 @@ class VAE(BaseLatentModeModuleClass):
             return_dist=True,
         )
         # decoder goes from n_latent-dimensional space to n_input-d data
-
-        ## 设定decoder输入的维度
         n_input_decoder = n_latent + n_continuous_cov
         self.decoder = DecoderSCVI(
             n_input_decoder,
@@ -232,24 +222,19 @@ class VAE(BaseLatentModeModuleClass):
         self.number_vp_components = number_vp_components
         if self.use_vampprior:
             self.add_pseudoinputs(n_input)
-            
-        ## 在最后activation部分的时候考虑到用的是size factor or library size，如果是size factor则使用softplus
-        ## Assign n_input_encoder/decoder to the class
-        self.n_input_encoder = n_input_encoder
-        self.n_input_decoder = n_input_decoder
 
     def add_pseudoinputs(self,n_input):
         self.means = FCLayers(self.number_vp_components, n_input,bias = False)
         #normal_init(self.means.linear, self.args.pseudoinputs_mean, self.args.pseudoinputs_std)
-        self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)
+        self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)        
 
     def _get_inference_input(
         self,
-        tensors, ## 感觉这像个tensor的dict object。。。
+        tensors,
     ):
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
 
-        cont_key = REGISTRY_KEYS.CONT_COVS_KEY 
+        cont_key = REGISTRY_KEYS.CONT_COVS_KEY
         cont_covs = tensors[cont_key] if cont_key in tensors.keys() else None
 
         cat_key = REGISTRY_KEYS.CAT_COVS_KEY
@@ -261,28 +246,29 @@ class VAE(BaseLatentModeModuleClass):
                 x=x, batch_index=batch_index, cont_covs=cont_covs, cat_covs=cat_covs
             )
         else:
-            if self.latent_data_type == "dist":
+            if self.latent_data_type == _SCVI_LATENT_MODE:
                 qzm = tensors[REGISTRY_KEYS.LATENT_QZM_KEY]
                 qzv = tensors[REGISTRY_KEYS.LATENT_QZV_KEY]
-                input_dict = dict(qzm=qzm, qzv=qzv)
+                observed_lib_size = tensors[REGISTRY_KEYS.OBSERVED_LIB_SIZE]
+                input_dict = dict(qzm=qzm, qzv=qzv, observed_lib_size=observed_lib_size)
             else:
                 raise ValueError(f"Unknown latent data type: {self.latent_data_type}")
 
-        return input_dict  ## 这个函数可以生成提供给encoder的input dictionary
+        return input_dict
 
     def _get_generative_input(self, tensors, inference_outputs):
-        z = inference_outputs["z"] ## inference部分输出了变量z和library size
+        z = inference_outputs["z"]
         library = inference_outputs["library"]
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
-        y = tensors[REGISTRY_KEYS.LABELS_KEY] ## 设定label keys
+        y = tensors[REGISTRY_KEYS.LABELS_KEY]
 
-        cont_key = REGISTRY_KEYS.CONT_COVS_KEY 
+        cont_key = REGISTRY_KEYS.CONT_COVS_KEY
         cont_covs = tensors[cont_key] if cont_key in tensors.keys() else None
 
         cat_key = REGISTRY_KEYS.CAT_COVS_KEY
         cat_covs = tensors[cat_key] if cat_key in tensors.keys() else None
 
-        size_factor_key = REGISTRY_KEYS.SIZE_FACTOR_KEY ## 设定size factors
+        size_factor_key = REGISTRY_KEYS.SIZE_FACTOR_KEY
         size_factor = (
             torch.log(tensors[size_factor_key])
             if size_factor_key in tensors.keys()
@@ -298,7 +284,7 @@ class VAE(BaseLatentModeModuleClass):
             cat_covs=cat_covs,
             size_factor=size_factor,
         )
-        return input_dict ## 生成提供给decoder的dictionary
+        return input_dict
 
     def _compute_local_library_params(self, batch_index):
         """
@@ -315,7 +301,7 @@ class VAE(BaseLatentModeModuleClass):
         local_library_log_vars = F.linear(
             one_hot(batch_index, n_batch), self.library_log_vars
         )
-        return local_library_log_means, local_library_log_vars ## 对每个cell encode出library size的mean and variance依据batch one_hot encode的结果
+        return local_library_log_means, local_library_log_vars
 
     @auto_move_data
     def _regular_inference(
@@ -337,11 +323,11 @@ class VAE(BaseLatentModeModuleClass):
         else:
             encoder_input = x_
         if cat_covs is not None and self.encode_covariates:
-            categorical_input = torch.split(cat_covs, 1, dim=1) ## 按列分割，组合成tuple对象
+            categorical_input = torch.split(cat_covs, 1, dim=1)
         else:
             categorical_input = tuple()
-        qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input) ## encode distribution of z and z
-        ql = None ## encode distribution of l
+        qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input)
+        ql = None
         if not self.use_observed_lib_size:
             ql, library_encoded = self.l_encoder(
                 encoder_input, batch_index, *categorical_input
@@ -357,29 +343,25 @@ class VAE(BaseLatentModeModuleClass):
                 )
             else:
                 library = ql.sample((n_samples,))
-
-        if self.use_vampprior:
-            q = self.z_encoder.encoder(encoder_input, batch_index, *categorical_input)
-            z_q_mean = self.z_encoder.mean_encoder(q)
-            z_q_logvar = self.z_encoder.var_encoder(q)
-            z = reparameterize(z_q_mean,z_q_logvar)
-            i_outputs = dict(z=z, qz=qz, ql=ql, library=library,z_q_mean = z_q_mean,z_q_logvar = z_q_logvar)
-        else:
-            i_outputs = dict(z=z, qz=qz, ql=ql, library=library) ## 当n_sample > 1的时候，此时z和library都是从q分布中sample出来的，且z进行了z-score transformation
-        
-        return i_outputs
+        outputs = dict(z=z, qz=qz, ql=ql, library=library)
+        return outputs
 
     @auto_move_data
-    def _cached_inference(self, qzm, qzv, n_samples=1):
-        if self.latent_data_type == "dist":
+    def _cached_inference(self, qzm, qzv, observed_lib_size, n_samples=1):
+        if self.latent_data_type == _SCVI_LATENT_MODE:
             dist = Normal(qzm, qzv.sqrt())
             # use dist.sample() rather than rsample because we aren't optimizing
             # the z in latent/cached mode
-            untran_z = dist.sample() if n_samples == 1 else dist.sample((n_samples,)) ## cached_inference 不需要在latent space上进行优化所以不需要用重参数化的技巧来进行sampling
+            untran_z = dist.sample() if n_samples == 1 else dist.sample((n_samples,))
             z = self.z_encoder.z_transformation(untran_z)
+            library = torch.log(observed_lib_size)
+            if n_samples > 1:
+                library = library.unsqueeze(0).expand(
+                    (n_samples, library.size(0), library.size(1))
+                )
         else:
             raise ValueError(f"Unknown latent data type: {self.latent_data_type}")
-        outputs = dict(z=z, qz_m=qzm, qz_v=qzv, ql=None, library=None)
+        outputs = dict(z=z, qz_m=qzm, qz_v=qzv, ql=None, library=library)
         return outputs
 
     @auto_move_data
@@ -404,10 +386,10 @@ class VAE(BaseLatentModeModuleClass):
                 [z, cont_covs.unsqueeze(0).expand(z.size(0), -1, -1)], dim=-1
             )
         else:
-            decoder_input = torch.cat([z, cont_covs], dim=-1) ## 合并latent z和covariable
+            decoder_input = torch.cat([z, cont_covs], dim=-1)
 
         if cat_covs is not None:
-            categorical_input = torch.split(cat_covs, 1, dim=1) ## 分割column
+            categorical_input = torch.split(cat_covs, 1, dim=1)
         else:
             categorical_input = tuple()
 
@@ -424,8 +406,8 @@ class VAE(BaseLatentModeModuleClass):
             batch_index,
             *categorical_input,
             y,
-        ) ## decoder输出的其实是ZINB/poisson/NB的参数
-        if self.dispersion == "gene-label": ## 将dispersion variable condition on label/batch
+        )
+        if self.dispersion == "gene-label":
             px_r = F.linear(
                 one_hot(y, self.n_labels), self.px_r
             )  # px_r gets transposed - last dimension is nb genes
@@ -456,63 +438,13 @@ class VAE(BaseLatentModeModuleClass):
                 local_library_log_means,
                 local_library_log_vars,
             ) = self._compute_local_library_params(batch_index)
-            pl = Normal(local_library_log_means, local_library_log_vars.sqrt()) ## 这里假设log library size是服从正态分布
-        
-        
-        ###### fix, add VampPrior
-        if self.use_vampprior:
-            if cat_covs is not None:
-                cat_covs_zero = torch.zeros_like(cat_covs)-1
-                if self.encode_covariates:
-                    categorical_input = torch.split(cat_covs_zero, 1, dim=1) ## 按列分割，组合成tuple对象
-            else:
-                categorical_input = tuple()
-            ## convert input batch_index and categorical_input all equal to zero
-            batch_index_zero = torch.zeros_like(batch_index)-1
-            q = self.z_encoder.encoder(self.means(self.idle_input), batch_index_zero, *categorical_input) ## encode distribution of z and z
-            
-            ## get location parameter
-            z_p_mean = self.z_encoder.mean_encoder(q)
-            z_p_logvar = self.z_encoder.var_encoder(q)
-            g_outputs = dict(
-            px=px,
-            pl=pl,
-            z_p_mean = z_p_mean,
-            z_p_logvar = z_p_logvar,
-            )
-        else:
-            pz = Normal(torch.zeros_like(z), torch.ones_like(z)) ## 这里的prior是standard multivariate distribution，需要改成VampPrior的部分   
-            g_outputs = dict(
+            pl = Normal(local_library_log_means, local_library_log_vars.sqrt())
+        pz = Normal(torch.zeros_like(z), torch.ones_like(z))
+        return dict(
             px=px,
             pl=pl,
             pz=pz,
-            )  
-        ######################################################
-        return g_outputs
-
-
-    def vp_kl(self,inference_outputs, generative_outputs):
-        z = inference_outputs["z"]
-        z_q_mean = inference_outputs["z_q_mean"]
-        z_q_logvar = inference_outputs["z_q_logvar"]
-        z_p_mean = generative_outputs["z_p_mean"]
-        z_p_logvar = generative_outputs["z_p_logvar"]
-        
-        log_q_z = log_Normal_diag(z, z_q_mean, z_q_logvar, dim=1)
-
-        z_expand = z.unsqueeze(1)
-        means = z_p_mean.unsqueeze(0)
-        logvars = z_p_logvar.unsqueeze(0)
-
-        a = log_Normal_diag(z_expand, means, logvars, dim=2) - math.log(self.number_vp_components)  # MB x C
-        a_max, _ = torch.max(a, 1)  # MB x 1
-
-        # calculte log-sum-exp
-        log_p_z = a_max + torch.log(torch.sum(torch.exp(a - a_max.unsqueeze(1)), 1))  # MB x 1
-        
-        KL = -(log_p_z - log_q_z)
-
-        return KL
+        )
 
     def loss(
         self,
@@ -523,14 +455,9 @@ class VAE(BaseLatentModeModuleClass):
     ):
         """Computes the loss function for the model."""
         x = tensors[REGISTRY_KEYS.X_KEY]
-
-        if self.vampprior:
-            kl_divergence_z = self.vp_kl(inference_outputs, generative_outputs)
-        else:
-            kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(
-                dim=1
-                )
-                
+        kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(
+            dim=1
+        )
         if not self.use_observed_lib_size:
             kl_divergence_l = kl(
                 inference_outputs["ql"],
@@ -553,11 +480,9 @@ class VAE(BaseLatentModeModuleClass):
         )
         return LossOutput(
             loss=loss, reconstruction_loss=reconst_loss, kl_local=kl_local
-        )  ## LossOutput 也是scVI提供的class，用来给loss的输出提供一些operations
+        )
 
-    
-    ## 从后验分布里sample出观测数据集
-    @torch.inference_mode() ## context manager，不使用autograd （autograd = False）
+    @torch.inference_mode()
     def sample(
         self,
         tensors,
@@ -631,10 +556,10 @@ class VAE(BaseLatentModeModuleClass):
                 Normal(torch.zeros_like(qz.loc), torch.ones_like(qz.scale))
                 .log_prob(z)
                 .sum(dim=-1)
-            ) 
+            )
             p_x_zl = -reconst_loss
             q_z_x = qz.log_prob(z).sum(dim=-1)
-            log_prob_sum = p_z + p_x_zl - q_z_x ## log reconstruction loss + log KL divergence
+            log_prob_sum = p_z + p_x_zl - q_z_x
 
             if not self.use_observed_lib_size:
                 (
@@ -649,7 +574,7 @@ class VAE(BaseLatentModeModuleClass):
                 )
                 q_l_x = ql.log_prob(library).sum(dim=-1)
 
-                log_prob_sum += p_l - q_l_x ## 再加上KL divergence of library size parameters
+                log_prob_sum += p_l - q_l_x
 
             to_sum[:, i] = log_prob_sum
 
