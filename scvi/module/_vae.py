@@ -3,6 +3,7 @@ from typing import Callable, Iterable, Literal, Optional
 
 import numpy as np
 import torch
+import math
 import torch.nn.functional as F
 from torch import logsumexp
 from torch.distributions import Normal
