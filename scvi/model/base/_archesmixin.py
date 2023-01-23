@@ -148,7 +148,13 @@ class ArchesMixin:
             freeze_classifier=freeze_classifier,
         )
         model.is_trained_ = False
-
+        
+        ### Vamp_prior currently only work on scVI model
+        class_Name = str(model.__class__).replace("'>","")
+        class_Name = class_Name.split(".")[3]
+        if class_Name == "SCVI":
+            model.use_vampprior = True
+            
         return model
 
     @staticmethod
