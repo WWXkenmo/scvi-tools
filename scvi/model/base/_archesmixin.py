@@ -105,7 +105,10 @@ class ArchesMixin:
             allow_missing_labels=True,
             **registry[_SETUP_ARGS_KEY],
         )
-
+        
+        ## set prior equal to vampprior
+        attr_dict['init_params_']['non_kwargs']['use_vampprior'] = True
+        
         model = _initialize_model(cls, adata, attr_dict)
         adata_manager = model.get_anndata_manager(adata, required=True)
 
@@ -150,11 +153,11 @@ class ArchesMixin:
         model.is_trained_ = False
         
         ### Vamp_prior currently only work on scVI model
-        class_Name = str(model.__class__).replace("'>","")
-        class_Name = class_Name.split(".")[3]
-        if class_Name == "SCVI":
-            model.module.use_vampprior = True
-            model.module.add_pseudoinputs(model.module.n_input)
+        #class_Name = str(model.__class__).replace("'>","")
+        #class_Name = class_Name.split(".")[3]
+        #if class_Name == "SCVI":
+        #    model.module.use_vampprior = True
+        #    model.module.add_pseudoinputs(model.module.n_input)
             
         return model
 
