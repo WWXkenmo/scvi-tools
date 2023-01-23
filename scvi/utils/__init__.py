@@ -4,6 +4,7 @@ from ._docstrings import setup_anndata_dsp
 from ._exceptions import InvalidParameterError
 from ._jax import device_selecting_PRNGKey
 from ._track import track
+from ._vamp_utils import reparameterize, log_Normal_diag
 
 __all__ = [
     "track",
@@ -12,4 +13,6 @@ __all__ = [
     "device_selecting_PRNGKey",
     "unsupported_in_latent_mode",
     "InvalidParameterError",
+    "reparameterize",
+    "log_Normal_diag",
 ]
