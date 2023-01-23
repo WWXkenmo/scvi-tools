@@ -1,1046 +1,786 @@
-import collections
-from typing import Callable, Iterable, List, Literal, Optional
+"""Main module."""
+from typing import Callable, Iterable, Literal, Optional
 
+import numpy as np
 import torch
-from torch import nn
+import torch.nn.functional as F
+from torch import logsumexp
 from torch.distributions import Normal
-from torch.nn import ModuleList
+from torch.distributions import kl_divergence as kl
+from torch.autograd import Variable
 
-from ._utils import one_hot
+from scvi import REGISTRY_KEYS
+from scvi.autotune._types import Tunable
+from scvi.distributions import NegativeBinomial, Poisson, ZeroInflatedNegativeBinomial
+from scvi.module.base import BaseLatentModeModuleClass, LossOutput, auto_move_data
+from scvi.nn import DecoderSCVI, Encoder, LinearDecoderSCVI, one_hot, FCLayers
+from scvi.utils import reparameterize, log_Normal_diag 
+
+torch.backends.cudnn.benchmark = True
+
+_SCVI_LATENT_MODE = "posterior_parameters"
 
 
-def _identity(x):
-    return x
-
-
-class FCLayers(nn.Module):
+class VAE(BaseLatentModeModuleClass):
     """
-    A helper class to build fully-connected layers for a neural network.
+    Variational auto-encoder model.
 
-    Parameters
-    ----------
-    n_in
-        The dimensionality of the input
-    n_out
-        The dimensionality of the output
-    n_cat_list
-        A list containing, for each category of interest,
-        the number of categories. Each category will be
-        included using a one-hot encoding.
-    n_layers
-        The number of fully-connected hidden layers
-    n_hidden
-        The number of nodes per hidden layer
-    dropout_rate
-        Dropout rate to apply to each of the hidden layers
-    use_batch_norm
-        Whether to have `BatchNorm` layers or not
-    use_layer_norm
-        Whether to have `LayerNorm` layers or not
-    use_activation
-        Whether to have layer activation or not
-    bias
-        Whether to learn bias in linear layers or not
-    inject_covariates
-        Whether to inject covariates in each layer, or just the first (default).
-    activation_fn
-        Which activation function to use
-    """
-
-    def __init__(
-        self,
-        n_in: int,
-        n_out: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 1,
-        n_hidden: int = 128,
-        dropout_rate: float = 0.1,
-        use_batch_norm: bool = True,
-        use_layer_norm: bool = False,
-        use_activation: bool = True,
-        bias: bool = True,
-        inject_covariates: bool = True,
-        activation_fn: nn.Module = nn.ReLU,
-    ):
-        super().__init__()
-        self.inject_covariates = inject_covariates
-        layers_dim = [n_in] + (n_layers - 1) * [n_hidden] + [n_out]
-
-        if n_cat_list is not None:
-            # n_cat = 1 will be ignored
-            self.n_cat_list = [n_cat if n_cat > 1 else 0 for n_cat in n_cat_list]
-        else:
-            self.n_cat_list = []
-
-        cat_dim = sum(self.n_cat_list)
-        self.fc_layers = nn.Sequential(
-            collections.OrderedDict(
-                [
-                    (
-                        f"Layer {i}",
-                        nn.Sequential(
-                            nn.Linear(
-                                n_in + cat_dim * self.inject_into_layer(i),
-                                n_out,
-                                bias=bias,
-                            ),
-                            # non-default params come from defaults in original Tensorflow implementation
-                            nn.BatchNorm1d(n_out, momentum=0.01, eps=0.001)
-                            if use_batch_norm
-                            else None,
-                            nn.LayerNorm(n_out, elementwise_affine=False)
-                            if use_layer_norm
-                            else None,
-                            activation_fn() if use_activation else None,
-                            nn.Dropout(p=dropout_rate) if dropout_rate > 0 else None,
-                        ),
-                    )
-                    for i, (n_in, n_out) in enumerate(
-                        zip(layers_dim[:-1], layers_dim[1:])
-                    )
-                ]
-            )
-        )
-
-    def inject_into_layer(self, layer_num) -> bool:
-        """Helper to determine if covariates should be injected."""
-        user_cond = layer_num == 0 or (layer_num > 0 and self.inject_covariates)
-        return user_cond
-
-    def set_online_update_hooks(self, hook_first_layer=True):
-        """Set online update hooks."""
-        self.hooks = []
-
-        def _hook_fn_weight(grad):
-            categorical_dims = sum(self.n_cat_list)
-            new_grad = torch.zeros_like(grad)
-            if categorical_dims > 0:
-                new_grad[:, -categorical_dims:] = grad[:, -categorical_dims:]
-            return new_grad
-
-        def _hook_fn_zero_out(grad):
-            return grad * 0
-
-        for i, layers in enumerate(self.fc_layers):
-            for layer in layers:
-                if i == 0 and not hook_first_layer:
-                    continue
-                if isinstance(layer, nn.Linear):
-                    if self.inject_into_layer(i):
-                        w = layer.weight.register_hook(_hook_fn_weight)
-                    else:
-                        w = layer.weight.register_hook(_hook_fn_zero_out)
-                    self.hooks.append(w)
-                    b = layer.bias.register_hook(_hook_fn_zero_out)
-                    self.hooks.append(b)
-
-    def forward(self, x: torch.Tensor, *cat_list: int):
-        """
-        Forward computation on ``x``.
-
-        Parameters
-        ----------
-        x
-            tensor of values with shape ``(n_in,)``
-        cat_list
-            list of category membership(s) for this sample
-
-        Returns
-        -------
-        :class:`torch.Tensor`
-            tensor of shape ``(n_out,)``
-        """
-        one_hot_cat_list = []  # for generality in this list many indices useless.
-
-        if len(self.n_cat_list) > len(cat_list):
-            raise ValueError(
-                "nb. categorical args provided doesn't match init. params."
-            )
-        for n_cat, cat in zip(self.n_cat_list, cat_list):
-            if n_cat and cat is None:
-                raise ValueError("cat not provided while n_cat != 0 in init. params.")
-            if n_cat > 1:  # n_cat = 1 will be ignored - no additional information
-                if cat.size(1) != n_cat:
-                    one_hot_cat = one_hot(cat, n_cat)
-                else:
-                    one_hot_cat = cat  # cat has already been one_hot encoded
-                one_hot_cat_list += [one_hot_cat]
-        for i, layers in enumerate(self.fc_layers):
-            for layer in layers:
-                if layer is not None:
-                    if isinstance(layer, nn.BatchNorm1d):
-                        if x.dim() == 3:
-                            x = torch.cat(
-                                [(layer(slice_x)).unsqueeze(0) for slice_x in x], dim=0
-                            )
-                        else:
-                            x = layer(x)
-                    else:
-                        if isinstance(layer, nn.Linear) and self.inject_into_layer(i):
-                            if x.dim() == 3:
-                                one_hot_cat_list_layer = [
-                                    o.unsqueeze(0).expand(
-                                        (x.size(0), o.size(0), o.size(1))
-                                    )
-                                    for o in one_hot_cat_list
-                                ]
-                            else:
-                                one_hot_cat_list_layer = one_hot_cat_list
-                            x = torch.cat((x, *one_hot_cat_list_layer), dim=-1)
-                        x = layer(x)
-        return x
-
-
-# Encoder
-class Encoder(nn.Module):
-    """
-    Encode data of ``n_input`` dimensions into a latent space of ``n_output`` dimensions.
-
-    Uses a fully-connected neural network of ``n_hidden`` layers.
+    This is an implementation of the scVI model described in :cite:p:`Lopez18`.
 
     Parameters
     ----------
     n_input
-        The dimensionality of the input (data space)
-    n_output
-        The dimensionality of the output (latent space)
-    n_cat_list
-        A list containing the number of categories
-        for each category of interest. Each category will be
-        included using a one-hot encoding
-    n_layers
-        The number of fully-connected hidden layers
+        Number of input genes
+    n_batch
+        Number of batches, if 0, no batch correction is performed.
+    n_labels
+        Number of labels
     n_hidden
-        The number of nodes per hidden layer
+        Number of nodes per hidden layer
+    n_latent
+        Dimensionality of the latent space
+    n_layers
+        Number of hidden layers used for encoder and decoder NNs
+    n_continuous_cov
+        Number of continuous covarites
+    n_cats_per_cov
+        Number of categories for each extra categorical covariate
     dropout_rate
-        Dropout rate to apply to each of the hidden layers
-    distribution
-        Distribution of z
-    var_eps
-        Minimum value for the variance;
-        used for numerical stability
+        Dropout rate for neural networks
+    dispersion
+        One of the following
+
+        * ``'gene'`` - dispersion parameter of NB is constant per gene across cells
+        * ``'gene-batch'`` - dispersion can differ between different batches
+        * ``'gene-label'`` - dispersion can differ between different labels
+        * ``'gene-cell'`` - dispersion can differ for every gene in every cell
+    log_variational
+        Log(data+1) prior to encoding for numerical stability. Not normalization.
+    gene_likelihood
+        One of
+
+        * ``'nb'`` - Negative binomial distribution
+        * ``'zinb'`` - Zero-inflated negative binomial distribution
+        * ``'poisson'`` - Poisson distribution
+    latent_distribution
+        One of
+
+        * ``'normal'`` - Isotropic normal
+        * ``'ln'`` - Logistic normal with normal params N(0, 1)
+    encode_covariates
+        Whether to concatenate covariates to expression in encoder
+    deeply_inject_covariates
+        Whether to concatenate covariates into output of hidden layers in encoder/decoder. This option
+        only applies when `n_layers` > 1. The covariates are concatenated to the input of subsequent hidden layers.
+    use_batch_norm
+        Whether to use batch norm in layers.
+    use_layer_norm
+        Whether to use layer norm in layers.
+    use_size_factor_key
+        Use size_factor AnnDataField defined by the user as scaling factor in mean of conditional distribution.
+        Takes priority over `use_observed_lib_size`.
+    use_observed_lib_size
+        Use observed library size for RNA as scaling factor in mean of conditional distribution
+    library_log_means
+        1 x n_batch array of means of the log library sizes. Parameterizes prior on library size if
+        not using observed library size.
+    library_log_vars
+        1 x n_batch array of variances of the log library sizes. Parameterizes prior on library size if
+        not using observed library size.
     var_activation
-        Callable used to ensure positivity of the variance.
-        Defaults to :meth:`torch.exp`.
-    return_dist
-        Return directly the distribution of z instead of its parameters.
-    **kwargs
-        Keyword args for :class:`~scvi.nn.FCLayers`
+        Callable used to ensure positivity of the variational distributions' variance.
+        When `None`, defaults to `torch.exp`.
+    latent_data_type
+        None or the type of latent data.
     """
 
     def __init__(
         self,
         n_input: int,
-        n_output: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 1,
-        n_hidden: int = 128,
-        dropout_rate: float = 0.1,
-        distribution: str = "normal",
-        var_eps: float = 1e-4,
+        n_batch: int = 0,
+        n_labels: int = 0,
+        n_hidden: Tunable[int] = 128,
+        n_latent: Tunable[int] = 10,
+        n_layers: Tunable[int] = 1,
+        n_continuous_cov: int = 0,
+        n_cats_per_cov: Optional[Iterable[int]] = None,
+        dropout_rate: Tunable[float] = 0.1,
+        dispersion: Tunable[
+            Literal["gene", "gene-batch", "gene-label", "gene-cell"]
+        ] = "gene",
+        log_variational: bool = True,
+        gene_likelihood: Tunable[Literal["zinb", "nb", "poisson"]] = "zinb",
+        latent_distribution: Tunable[Literal["normal", "ln"]] = "normal",
+        encode_covariates: Tunable[bool] = False,
+        deeply_inject_covariates: Tunable[bool] = True,
+        use_batch_norm: Tunable[Literal["encoder", "decoder", "none", "both"]] = "both",
+        use_layer_norm: Tunable[Literal["encoder", "decoder", "none", "both"]] = "none",
+        use_size_factor_key: bool = False,
+        use_observed_lib_size: bool = True,
+        library_log_means: Optional[np.ndarray] = None,
+        library_log_vars: Optional[np.ndarray] = None,
         var_activation: Optional[Callable] = None,
-        return_dist: bool = False,
-        **kwargs,
+        use_vampprior: bool = False,
+        number_vp_components: Tunable[int] = 10,
     ):
         super().__init__()
+        self.dispersion = dispersion
+        self.n_latent = n_latent
+        self.log_variational = log_variational
+        self.gene_likelihood = gene_likelihood
+        # Automatically deactivate if useless
+        self.n_batch = n_batch
+        self.n_labels = n_labels
+        self.latent_distribution = latent_distribution
+        self.encode_covariates = encode_covariates
 
-        self.distribution = distribution
-        self.var_eps = var_eps
-        self.encoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            **kwargs,
-        )
-        self.mean_encoder = nn.Linear(n_hidden, n_output)
-        self.var_encoder = nn.Linear(n_hidden, n_output)
-        self.return_dist = return_dist
-
-        if distribution == "ln":
-            self.z_transformation = nn.Softmax(dim=-1)
-        else:
-            self.z_transformation = _identity
-        self.var_activation = torch.exp if var_activation is None else var_activation
-
-    def forward(self, x: torch.Tensor, *cat_list: int):
-        r"""
-        The forward computation for a single sample.
-
-         #. Encodes the data into latent space using the encoder network
-         #. Generates a mean \\( q_m \\) and variance \\( q_v \\)
-         #. Samples a new value from an i.i.d. multivariate normal \\( \\sim Ne(q_m, \\mathbf{I}q_v) \\)
-
-        Parameters
-        ----------
-        x
-            tensor with shape (n_input,)
-        cat_list
-            list of category membership(s) for this sample
-
-        Returns
-        -------
-        3-tuple of :py:class:`torch.Tensor`
-            tensors of shape ``(n_latent,)`` for mean and var, and sample
-
-        """
-        # Parameters for latent distribution
-        q = self.encoder(x, *cat_list)
-        q_m = self.mean_encoder(q)
-        q_v = self.var_activation(self.var_encoder(q)) + self.var_eps
-        dist = Normal(q_m, q_v.sqrt())
-        latent = self.z_transformation(dist.rsample())
-        if self.return_dist:
-            return dist, latent
-        return q_m, q_v, latent
-
-
-# Decoder
-class DecoderSCVI(nn.Module):
-    """
-    Decodes data from latent space of ``n_input`` dimensions into ``n_output`` dimensions.
-
-    Uses a fully-connected neural network of ``n_hidden`` layers.
-
-    Parameters
-    ----------
-    n_input
-        The dimensionality of the input (latent space)
-    n_output
-        The dimensionality of the output (data space)
-    n_cat_list
-        A list containing the number of categories
-        for each category of interest. Each category will be
-        included using a one-hot encoding
-    n_layers
-        The number of fully-connected hidden layers
-    n_hidden
-        The number of nodes per hidden layer
-    dropout_rate
-        Dropout rate to apply to each of the hidden layers
-    inject_covariates
-        Whether to inject covariates in each layer, or just the first (default).
-    use_batch_norm
-        Whether to use batch norm in layers
-    use_layer_norm
-        Whether to use layer norm in layers
-    scale_activation
-        Activation layer to use for px_scale_decoder
-    """
-
-    def __init__(
-        self,
-        n_input: int,
-        n_output: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 1,
-        n_hidden: int = 128,
-        inject_covariates: bool = True,
-        use_batch_norm: bool = False,
-        use_layer_norm: bool = False,
-        scale_activation: Literal["softmax", "softplus"] = "softmax",
-    ):
-        super().__init__()
-        self.px_decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=0,
-            inject_covariates=inject_covariates,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-        )
-
-        # mean gamma
-        if scale_activation == "softmax":
-            px_scale_activation = nn.Softmax(dim=-1)
-        elif scale_activation == "softplus":
-            px_scale_activation = nn.Softplus()
-        self.px_scale_decoder = nn.Sequential(
-            nn.Linear(n_hidden, n_output),
-            px_scale_activation,
-        )
-
-        # dispersion: here we only deal with gene-cell dispersion case
-        self.px_r_decoder = nn.Linear(n_hidden, n_output)
-
-        # dropout
-        self.px_dropout_decoder = nn.Linear(n_hidden, n_output)
-
-    def forward(
-        self,
-        dispersion: str,
-        z: torch.Tensor,
-        library: torch.Tensor,
-        *cat_list: int,
-    ):
-        """
-        The forward computation for a single sample.
-
-         #. Decodes the data from the latent space using the decoder network
-         #. Returns parameters for the ZINB distribution of expression
-         #. If ``dispersion != 'gene-cell'`` then value for that param will be ``None``
-
-        Parameters
-        ----------
-        dispersion
-            One of the following
-
-            * ``'gene'`` - dispersion parameter of NB is constant per gene across cells
-            * ``'gene-batch'`` - dispersion can differ between different batches
-            * ``'gene-label'`` - dispersion can differ between different labels
-            * ``'gene-cell'`` - dispersion can differ for every gene in every cell
-        z :
-            tensor with shape ``(n_input,)``
-        library_size
-            library size
-        cat_list
-            list of category membership(s) for this sample
-
-        Returns
-        -------
-        4-tuple of :py:class:`torch.Tensor`
-            parameters for the ZINB distribution of expression
-
-        """
-        # The decoder returns values for the parameters of the ZINB distribution
-        px = self.px_decoder(z, *cat_list)
-        px_scale = self.px_scale_decoder(px)
-        px_dropout = self.px_dropout_decoder(px)
-        # Clamp to high value: exp(12) ~ 160000 to avoid nans (computational stability)
-        px_rate = torch.exp(library) * px_scale  # torch.clamp( , max=12)
-        px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
-        return px_scale, px_r, px_rate, px_dropout
-
-
-class LinearDecoderSCVI(nn.Module):
-    """Linear decoder for scVI."""
-
-    def __init__(
-        self,
-        n_input: int,
-        n_output: int,
-        n_cat_list: Iterable[int] = None,
-        use_batch_norm: bool = False,
-        use_layer_norm: bool = False,
-        bias: bool = False,
-    ):
-        super().__init__()
-
-        # mean gamma
-        self.factor_regressor = FCLayers(
-            n_in=n_input,
-            n_out=n_output,
-            n_cat_list=n_cat_list,
-            n_layers=1,
-            use_activation=False,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-            bias=bias,
-            dropout_rate=0,
-        )
-
-        # dropout
-        self.px_dropout_decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_output,
-            n_cat_list=n_cat_list,
-            n_layers=1,
-            use_activation=False,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-            bias=bias,
-            dropout_rate=0,
-        )
-
-    def forward(
-        self, dispersion: str, z: torch.Tensor, library: torch.Tensor, *cat_list: int
-    ):
-        """Forward pass."""
-        # The decoder returns values for the parameters of the ZINB distribution
-        raw_px_scale = self.factor_regressor(z, *cat_list)
-        px_scale = torch.softmax(raw_px_scale, dim=-1)
-        px_dropout = self.px_dropout_decoder(z, *cat_list)
-        px_rate = torch.exp(library) * px_scale
-        px_r = None
-
-        return px_scale, px_r, px_rate, px_dropout
-
-
-# Decoder
-class Decoder(nn.Module):
-    """
-    Decodes data from latent space to data space.
-
-    ``n_input`` dimensions to ``n_output``
-    dimensions using a fully-connected neural network of ``n_hidden`` layers.
-    Output is the mean and variance of a multivariate Gaussian
-
-    Parameters
-    ----------
-    n_input
-        The dimensionality of the input (latent space)
-    n_output
-        The dimensionality of the output (data space)
-    n_cat_list
-        A list containing the number of categories
-        for each category of interest. Each category will be
-        included using a one-hot encoding
-    n_layers
-        The number of fully-connected hidden layers
-    n_hidden
-        The number of nodes per hidden layer
-    dropout_rate
-        Dropout rate to apply to each of the hidden layers
-    kwargs
-        Keyword args for :class:`~scvi.module._base.FCLayers`
-    """
-
-    def __init__(
-        self,
-        n_input: int,
-        n_output: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 1,
-        n_hidden: int = 128,
-        **kwargs,
-    ):
-        super().__init__()
-        self.decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=0,
-            **kwargs,
-        )
-
-        self.mean_decoder = nn.Linear(n_hidden, n_output)
-        self.var_decoder = nn.Linear(n_hidden, n_output)
-
-    def forward(self, x: torch.Tensor, *cat_list: int):
-        """
-        The forward computation for a single sample.
-
-         #. Decodes the data from the latent space using the decoder network
-         #. Returns tensors for the mean and variance of a multivariate distribution
-
-        Parameters
-        ----------
-        x
-            tensor with shape ``(n_input,)``
-        cat_list
-            list of category membership(s) for this sample
-
-        Returns
-        -------
-        2-tuple of :py:class:`torch.Tensor`
-            Mean and variance tensors of shape ``(n_output,)``
-
-        """
-        # Parameters for latent distribution
-        p = self.decoder(x, *cat_list)
-        p_m = self.mean_decoder(p)
-        p_v = torch.exp(self.var_decoder(p))
-        return p_m, p_v
-
-
-class MultiEncoder(nn.Module):
-    """MultiEncoder."""
-
-    def __init__(
-        self,
-        n_heads: int,
-        n_input_list: List[int],
-        n_output: int,
-        n_hidden: int = 128,
-        n_layers_individual: int = 1,
-        n_layers_shared: int = 2,
-        n_cat_list: Iterable[int] = None,
-        dropout_rate: float = 0.1,
-        return_dist: bool = False,
-    ):
-        super().__init__()
-
-        self.encoders = ModuleList(
-            [
-                FCLayers(
-                    n_in=n_input_list[i],
-                    n_out=n_hidden,
-                    n_cat_list=n_cat_list,
-                    n_layers=n_layers_individual,
-                    n_hidden=n_hidden,
-                    dropout_rate=dropout_rate,
-                    use_batch_norm=True,
+        self.use_size_factor_key = use_size_factor_key
+        self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
+        if not self.use_observed_lib_size:
+            if library_log_means is None or library_log_vars is None:
+                raise ValueError(
+                    "If not using observed_lib_size, "
+                    "must provide library_log_means and library_log_vars."
                 )
-                for i in range(n_heads)
-            ]
-        )
 
-        self.encoder_shared = FCLayers(
-            n_in=n_hidden,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers_shared,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-        )
-
-        self.mean_encoder = nn.Linear(n_hidden, n_output)
-        self.var_encoder = nn.Linear(n_hidden, n_output)
-        self.return_dist = return_dist
-
-    def forward(self, x: torch.Tensor, head_id: int, *cat_list: int):
-        """Forward pass."""
-        q = self.encoders[head_id](x, *cat_list)
-        q = self.encoder_shared(q, *cat_list)
-
-        q_m = self.mean_encoder(q)
-        q_v = torch.exp(self.var_encoder(q))
-        dist = Normal(q_m, q_v.sqrt())
-        latent = dist.rsample()
-        if self.return_dist:
-            return dist, latent
-        return q_m, q_v, latent
-
-
-class MultiDecoder(nn.Module):
-    """MultiDecoder."""
-
-    def __init__(
-        self,
-        n_input: int,
-        n_output: int,
-        n_hidden_conditioned: int = 32,
-        n_hidden_shared: int = 128,
-        n_layers_conditioned: int = 1,
-        n_layers_shared: int = 1,
-        n_cat_list: Iterable[int] = None,
-        dropout_rate: float = 0.2,
-    ):
-        super().__init__()
-
-        n_out = n_hidden_conditioned if n_layers_shared else n_hidden_shared
-        if n_layers_conditioned:
-            self.px_decoder_conditioned = FCLayers(
-                n_in=n_input,
-                n_out=n_out,
-                n_cat_list=n_cat_list,
-                n_layers=n_layers_conditioned,
-                n_hidden=n_hidden_conditioned,
-                dropout_rate=dropout_rate,
-                use_batch_norm=True,
+            self.register_buffer(
+                "library_log_means", torch.from_numpy(library_log_means).float()
             )
-            n_in = n_out
-        else:
-            self.px_decoder_conditioned = None
-            n_in = n_input
-
-        if n_layers_shared:
-            self.px_decoder_final = FCLayers(
-                n_in=n_in,
-                n_out=n_hidden_shared,
-                n_cat_list=[],
-                n_layers=n_layers_shared,
-                n_hidden=n_hidden_shared,
-                dropout_rate=dropout_rate,
-                use_batch_norm=True,
+            self.register_buffer(
+                "library_log_vars", torch.from_numpy(library_log_vars).float()
             )
-            n_in = n_hidden_shared
+
+        if self.dispersion == "gene":
+            self.px_r = torch.nn.Parameter(torch.randn(n_input))
+        elif self.dispersion == "gene-batch":
+            self.px_r = torch.nn.Parameter(torch.randn(n_input, n_batch))
+        elif self.dispersion == "gene-label":
+            self.px_r = torch.nn.Parameter(torch.randn(n_input, n_labels))
+        elif self.dispersion == "gene-cell":
+            pass
         else:
-            self.px_decoder_final = None
+            raise ValueError(
+                "dispersion must be one of ['gene', 'gene-batch',"
+                " 'gene-label', 'gene-cell'], but input was "
+                "{}.format(self.dispersion)"
+            )
 
-        self.px_scale_decoder = nn.Sequential(
-            nn.Linear(n_in, n_output), nn.Softmax(dim=-1)
+        use_batch_norm_encoder = use_batch_norm == "encoder" or use_batch_norm == "both"
+        use_batch_norm_decoder = use_batch_norm == "decoder" or use_batch_norm == "both"
+        use_layer_norm_encoder = use_layer_norm == "encoder" or use_layer_norm == "both"
+        use_layer_norm_decoder = use_layer_norm == "decoder" or use_layer_norm == "both"
+
+        # z encoder goes from the n_input-dimensional data to an n_latent-d
+        # latent space representation
+        n_input_encoder = n_input + n_continuous_cov * encode_covariates
+        cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
+        encoder_cat_list = cat_list if encode_covariates else None
+        self.z_encoder = Encoder(
+            n_input_encoder,
+            n_latent,
+            n_cat_list=encoder_cat_list,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            dropout_rate=dropout_rate,
+            distribution=latent_distribution,
+            inject_covariates=deeply_inject_covariates,
+            use_batch_norm=use_batch_norm_encoder,
+            use_layer_norm=use_layer_norm_encoder,
+            var_activation=var_activation,
+            return_dist=True,
         )
-        self.px_r_decoder = nn.Linear(n_in, n_output)
-        self.px_dropout_decoder = nn.Linear(n_in, n_output)
-
-    def forward(
-        self,
-        z: torch.Tensor,
-        dataset_id: int,
-        library: torch.Tensor,
-        dispersion: str,
-        *cat_list: int,
-    ):
-        """Forward pass."""
-        px = z
-        if self.px_decoder_conditioned:
-            px = self.px_decoder_conditioned(px, *cat_list)
-        if self.px_decoder_final:
-            px = self.px_decoder_final(px, *cat_list)
-
-        px_scale = self.px_scale_decoder(px)
-        px_dropout = self.px_dropout_decoder(px)
-        px_rate = torch.exp(library) * px_scale
-        px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
-
-        return px_scale, px_r, px_rate, px_dropout
-
-
-class DecoderTOTALVI(nn.Module):
-    """
-    Decodes data from latent space of ``n_input`` dimensions ``n_output`` dimensions.
-
-    Uses a linear decoder.
-
-    Parameters
-    ----------
-    n_input
-        The dimensionality of the input (latent space)
-    n_output_genes
-        The dimensionality of the output (gene space)
-    n_output_proteins
-        The dimensionality of the output (protein space)
-    n_cat_list
-        A list containing the number of categories
-        for each category of interest. Each category will be
-        included using a one-hot encoding
-    use_batch_norm
-        Whether to use batch norm in layers
-    use_layer_norm
-        Whether to use layer norm in layers
-    scale_activation
-        Activation layer to use for px_scale_decoder
-    """
-
-    def __init__(
-        self,
-        n_input: int,
-        n_output_genes: int,
-        n_output_proteins: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 1,
-        n_hidden: int = 256,
-        dropout_rate: float = 0,
-        use_batch_norm: float = True,
-        use_layer_norm: float = False,
-        scale_activation: Literal["softmax", "softplus"] = "softmax",
-    ):
-        super().__init__()
-        self.n_output_genes = n_output_genes
-        self.n_output_proteins = n_output_proteins
-
-        linear_args = dict(
+        # l encoder goes from n_input-dimensional data to 1-d library size
+        self.l_encoder = Encoder(
+            n_input_encoder,
+            1,
             n_layers=1,
-            use_activation=False,
-            use_batch_norm=False,
-            use_layer_norm=False,
-            dropout_rate=0,
-        )
-
-        self.px_decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
+            n_cat_list=encoder_cat_list,
             n_hidden=n_hidden,
             dropout_rate=dropout_rate,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
+            inject_covariates=deeply_inject_covariates,
+            use_batch_norm=use_batch_norm_encoder,
+            use_layer_norm=use_layer_norm_encoder,
+            var_activation=var_activation,
+            return_dist=True,
         )
-
-        # mean gamma
-        self.px_scale_decoder = FCLayers(
-            n_in=n_hidden + n_input,
-            n_out=n_output_genes,
-            n_cat_list=n_cat_list,
-            **linear_args,
-        )
-        if scale_activation == "softmax":
-            self.px_scale_activation = nn.Softmax(dim=-1)
-        elif scale_activation == "softplus":
-            self.px_scale_activation = nn.Softplus()
-
-        # background mean first decoder
-        self.py_back_decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
+        # decoder goes from n_latent-dimensional space to n_input-d data
+        n_input_decoder = n_latent + n_continuous_cov
+        self.decoder = DecoderSCVI(
+            n_input_decoder,
+            n_input,
+            n_cat_list=cat_list,
             n_layers=n_layers,
             n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-        )
-        # background mean parameters second decoder
-        self.py_back_mean_log_alpha = FCLayers(
-            n_in=n_hidden + n_input,
-            n_out=n_output_proteins,
-            n_cat_list=n_cat_list,
-            **linear_args,
-        )
-        self.py_back_mean_log_beta = FCLayers(
-            n_in=n_hidden + n_input,
-            n_out=n_output_proteins,
-            n_cat_list=n_cat_list,
-            **linear_args,
+            inject_covariates=deeply_inject_covariates,
+            use_batch_norm=use_batch_norm_decoder,
+            use_layer_norm=use_layer_norm_decoder,
+            scale_activation="softplus" if use_size_factor_key else "softmax",
         )
 
-        # foreground increment decoder step 1
-        self.py_fore_decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-        )
-        # foreground increment decoder step 2
-        self.py_fore_scale_decoder = FCLayers(
-            n_in=n_hidden + n_input,
-            n_out=n_output_proteins,
-            n_cat_list=n_cat_list,
-            n_layers=1,
-            use_activation=True,
-            use_batch_norm=False,
-            use_layer_norm=False,
-            dropout_rate=0,
-            activation_fn=nn.ReLU,
-        )
+        ### add vamp prior
+        self.use_vampprior = use_vampprior
+        self.number_vp_components = number_vp_components
+        if self.use_vampprior:
+            self.add_pseudoinputs(n_input)
 
-        # dropout (mixture component for proteins, ZI probability for genes)
-        self.sigmoid_decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-        )
-        self.px_dropout_decoder_gene = FCLayers(
-            n_in=n_hidden + n_input,
-            n_out=n_output_genes,
-            n_cat_list=n_cat_list,
-            **linear_args,
-        )
+    def add_pseudoinputs(self,n_input):
+        self.means = FCLayers(self.number_vp_components, n_input,bias = False)
+        #normal_init(self.means.linear, self.args.pseudoinputs_mean, self.args.pseudoinputs_std)
+        self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components,device = self.device), requires_grad = False)        
 
-        self.py_background_decoder = FCLayers(
-            n_in=n_hidden + n_input,
-            n_out=n_output_proteins,
-            n_cat_list=n_cat_list,
-            **linear_args,
-        )
-
-    def forward(self, z: torch.Tensor, library_gene: torch.Tensor, *cat_list: int):
-        """
-        The forward computation for a single sample.
-
-         #. Decodes the data from the latent space using the decoder network
-         #. Returns local parameters for the ZINB distribution for genes
-         #. Returns local parameters for the Mixture NB distribution for proteins
-
-         We use the dictionary `px_` to contain the parameters of the ZINB/NB for genes.
-         The rate refers to the mean of the NB, dropout refers to Bernoulli mixing parameters.
-         `scale` refers to the quanity upon which differential expression is performed. For genes,
-         this can be viewed as the mean of the underlying gamma distribution.
-
-         We use the dictionary `py_` to contain the parameters of the Mixture NB distribution for proteins.
-         `rate_fore` refers to foreground mean, while `rate_back` refers to background mean. `scale` refers to
-         foreground mean adjusted for background probability and scaled to reside in simplex.
-         `back_alpha` and `back_beta` are the posterior parameters for `rate_back`.  `fore_scale` is the scaling
-         factor that enforces `rate_fore` > `rate_back`.
-
-        Parameters
-        ----------
-        z
-            tensor with shape ``(n_input,)``
-        library_gene
-            library size
-        cat_list
-            list of category membership(s) for this sample
-
-        Returns
-        -------
-        3-tuple (first 2-tuple :py:class:`dict`, last :py:class:`torch.Tensor`)
-            parameters for the ZINB distribution of expression
-
-        """
-        px_ = {}
-        py_ = {}
-
-        px = self.px_decoder(z, *cat_list)
-        px_cat_z = torch.cat([px, z], dim=-1)
-        unnorm_px_scale = self.px_scale_decoder(px_cat_z, *cat_list)
-        px_["scale"] = self.px_scale_activation(unnorm_px_scale)
-        px_["rate"] = library_gene * px_["scale"]
-
-        py_back = self.py_back_decoder(z, *cat_list)
-        py_back_cat_z = torch.cat([py_back, z], dim=-1)
-
-        py_["back_alpha"] = self.py_back_mean_log_alpha(py_back_cat_z, *cat_list)
-        py_["back_beta"] = torch.exp(
-            self.py_back_mean_log_beta(py_back_cat_z, *cat_list)
-        )
-        log_pro_back_mean = Normal(py_["back_alpha"], py_["back_beta"]).rsample()
-        py_["rate_back"] = torch.exp(log_pro_back_mean)
-
-        py_fore = self.py_fore_decoder(z, *cat_list)
-        py_fore_cat_z = torch.cat([py_fore, z], dim=-1)
-        py_["fore_scale"] = (
-            self.py_fore_scale_decoder(py_fore_cat_z, *cat_list) + 1 + 1e-8
-        )
-        py_["rate_fore"] = py_["rate_back"] * py_["fore_scale"]
-
-        p_mixing = self.sigmoid_decoder(z, *cat_list)
-        p_mixing_cat_z = torch.cat([p_mixing, z], dim=-1)
-        px_["dropout"] = self.px_dropout_decoder_gene(p_mixing_cat_z, *cat_list)
-        py_["mixing"] = self.py_background_decoder(p_mixing_cat_z, *cat_list)
-
-        protein_mixing = 1 / (1 + torch.exp(-py_["mixing"]))
-        py_["scale"] = torch.nn.functional.normalize(
-            (1 - protein_mixing) * py_["rate_fore"], p=1, dim=-1
-        )
-
-        return (px_, py_, log_pro_back_mean)
-
-
-# Encoder
-class EncoderTOTALVI(nn.Module):
-    """
-    Encodes data of ``n_input`` dimensions into a latent space of ``n_output`` dimensions.
-
-    Uses a fully-connected neural network of ``n_hidden`` layers.
-
-    Parameters
-    ----------
-    n_input
-        The dimensionality of the input (data space)
-    n_output
-        The dimensionality of the output (latent space)
-    n_cat_list
-        A list containing the number of categories
-        for each category of interest. Each category will be
-        included using a one-hot encoding
-    n_layers
-        The number of fully-connected hidden layers
-    n_hidden
-        The number of nodes per hidden layer
-    dropout_rate
-        Dropout rate to apply to each of the hidden layers
-    distribution
-        Distribution of the latent space, one of
-
-        * ``'normal'`` - Normal distribution
-        * ``'ln'`` - Logistic normal
-    use_batch_norm
-        Whether to use batch norm in layers
-    use_layer_norm
-        Whether to use layer norm
-    """
-
-    def __init__(
+    def _get_inference_input(
         self,
-        n_input: int,
-        n_output: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 2,
-        n_hidden: int = 256,
-        dropout_rate: float = 0.1,
-        distribution: str = "ln",
-        use_batch_norm: bool = True,
-        use_layer_norm: bool = False,
+        tensors,
     ):
-        super().__init__()
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
 
-        self.encoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-        )
-        self.z_mean_encoder = nn.Linear(n_hidden, n_output)
-        self.z_var_encoder = nn.Linear(n_hidden, n_output)
+        cont_key = REGISTRY_KEYS.CONT_COVS_KEY
+        cont_covs = tensors[cont_key] if cont_key in tensors.keys() else None
 
-        self.l_gene_encoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=1,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-        )
-        self.l_gene_mean_encoder = nn.Linear(n_hidden, 1)
-        self.l_gene_var_encoder = nn.Linear(n_hidden, 1)
+        cat_key = REGISTRY_KEYS.CAT_COVS_KEY
+        cat_covs = tensors[cat_key] if cat_key in tensors.keys() else None
 
-        self.distribution = distribution
-
-        if distribution == "ln":
-            self.z_transformation = nn.Softmax(dim=-1)
+        if self.latent_data_type is None:
+            x = tensors[REGISTRY_KEYS.X_KEY]
+            input_dict = dict(
+                x=x, batch_index=batch_index, cont_covs=cont_covs, cat_covs=cat_covs
+            )
         else:
-            self.z_transformation = _identity
+            if self.latent_data_type == _SCVI_LATENT_MODE:
+                qzm = tensors[REGISTRY_KEYS.LATENT_QZM_KEY]
+                qzv = tensors[REGISTRY_KEYS.LATENT_QZV_KEY]
+                observed_lib_size = tensors[REGISTRY_KEYS.OBSERVED_LIB_SIZE]
+                input_dict = dict(qzm=qzm, qzv=qzv, observed_lib_size=observed_lib_size)
+            else:
+                raise ValueError(f"Unknown latent data type: {self.latent_data_type}")
 
-        self.l_transformation = torch.exp
+        return input_dict
 
-    def reparameterize_transformation(self, mu, var):
-        """Reparameterization trick to sample from a normal distribution."""
-        untran_z = Normal(mu, var.sqrt()).rsample()
-        z = self.z_transformation(untran_z)
-        return z, untran_z
+    def _get_generative_input(self, tensors, inference_outputs):
+        z = inference_outputs["z"]
+        library = inference_outputs["library"]
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
+        y = tensors[REGISTRY_KEYS.LABELS_KEY]
 
-    def forward(self, data: torch.Tensor, *cat_list: int):
+        cont_key = REGISTRY_KEYS.CONT_COVS_KEY
+        cont_covs = tensors[cont_key] if cont_key in tensors.keys() else None
+
+        cat_key = REGISTRY_KEYS.CAT_COVS_KEY
+        cat_covs = tensors[cat_key] if cat_key in tensors.keys() else None
+
+        size_factor_key = REGISTRY_KEYS.SIZE_FACTOR_KEY
+        size_factor = (
+            torch.log(tensors[size_factor_key])
+            if size_factor_key in tensors.keys()
+            else None
+        )
+
+        input_dict = dict(
+            z=z,
+            library=library,
+            batch_index=batch_index,
+            y=y,
+            cont_covs=cont_covs,
+            cat_covs=cat_covs,
+            size_factor=size_factor,
+        )
+        return input_dict
+
+    def _compute_local_library_params(self, batch_index):
+        """
+        Computes local library parameters.
+
+        Compute two tensors of shape (batch_index.shape[0], 1) where each
+        element corresponds to the mean and variances, respectively, of the
+        log library sizes in the batch the cell corresponds to.
+        """
+        n_batch = self.library_log_means.shape[1]
+        local_library_log_means = F.linear(
+            one_hot(batch_index, n_batch), self.library_log_means
+        )
+        local_library_log_vars = F.linear(
+            one_hot(batch_index, n_batch), self.library_log_vars
+        )
+        return local_library_log_means, local_library_log_vars
+
+    @auto_move_data
+    def _regular_inference(
+        self, x, batch_index, cont_covs=None, cat_covs=None, n_samples=1
+    ):
+        """
+        High level inference method.
+
+        Runs the inference (encoder) model.
+        """
+        x_ = x
+        if self.use_observed_lib_size:
+            library = torch.log(x.sum(1)).unsqueeze(1)
+        if self.log_variational:
+            x_ = torch.log(1 + x_)
+
+        if cont_covs is not None and self.encode_covariates:
+            encoder_input = torch.cat((x_, cont_covs), dim=-1)
+        else:
+            encoder_input = x_
+        if cat_covs is not None and self.encode_covariates:
+            categorical_input = torch.split(cat_covs, 1, dim=1)
+        else:
+            categorical_input = tuple()
+        qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input)
+        ql = None
+        if not self.use_observed_lib_size:
+            ql, library_encoded = self.l_encoder(
+                encoder_input, batch_index, *categorical_input
+            )
+            library = library_encoded
+
+        if n_samples > 1:
+            untran_z = qz.sample((n_samples,))
+            z = self.z_encoder.z_transformation(untran_z)
+            if self.use_observed_lib_size:
+                library = library.unsqueeze(0).expand(
+                    (n_samples, library.size(0), library.size(1))
+                )
+            else:
+                library = ql.sample((n_samples,))
+        
+        if self.use_vampprior:
+            q = self.z_encoder.encoder(encoder_input, batch_index, *categorical_input)
+            z_q_mean = self.z_encoder.mean_encoder(q)
+            z_q_logvar = self.z_encoder.var_encoder(q)
+            z = reparameterize(z_q_mean,z_q_logvar)
+            i_outputs = dict(z=z, qz=qz, ql=ql, library=library,z_q_mean = z_q_mean,z_q_logvar = z_q_logvar)
+        else:
+            i_outputs = dict(z=z, qz=qz, ql=ql, library=library) ## 当n_sample > 1的时候，此时z和library都是从q分布中sample出来的，且z进行了z-score transformation
+        return i_outputs
+
+    @auto_move_data
+    def _cached_inference(self, qzm, qzv, observed_lib_size, n_samples=1):
+        if self.latent_data_type == _SCVI_LATENT_MODE:
+            dist = Normal(qzm, qzv.sqrt())
+            # use dist.sample() rather than rsample because we aren't optimizing
+            # the z in latent/cached mode
+            untran_z = dist.sample() if n_samples == 1 else dist.sample((n_samples,))
+            z = self.z_encoder.z_transformation(untran_z)
+            library = torch.log(observed_lib_size)
+            if n_samples > 1:
+                library = library.unsqueeze(0).expand(
+                    (n_samples, library.size(0), library.size(1))
+                )
+        else:
+            raise ValueError(f"Unknown latent data type: {self.latent_data_type}")
+        outputs = dict(z=z, qz_m=qzm, qz_v=qzv, ql=None, library=library)
+        return outputs
+
+    @auto_move_data
+    def generative(
+        self,
+        z,
+        library,
+        batch_index,
+        cont_covs=None,
+        cat_covs=None,
+        size_factor=None,
+        y=None,
+        transform_batch=None,
+    ):
+        """Runs the generative model."""
+        # TODO: refactor forward function to not rely on y
+        # Likelihood distribution
+        if cont_covs is None:
+            decoder_input = z
+        elif z.dim() != cont_covs.dim():
+            decoder_input = torch.cat(
+                [z, cont_covs.unsqueeze(0).expand(z.size(0), -1, -1)], dim=-1
+            )
+        else:
+            decoder_input = torch.cat([z, cont_covs], dim=-1)
+
+        if cat_covs is not None:
+            categorical_input = torch.split(cat_covs, 1, dim=1)
+        else:
+            categorical_input = tuple()
+
+        if transform_batch is not None:
+            batch_index = torch.ones_like(batch_index) * transform_batch
+
+        if not self.use_size_factor_key:
+            size_factor = library
+
+        px_scale, px_r, px_rate, px_dropout = self.decoder(
+            self.dispersion,
+            decoder_input,
+            size_factor,
+            batch_index,
+            *categorical_input,
+            y,
+        )
+        if self.dispersion == "gene-label":
+            px_r = F.linear(
+                one_hot(y, self.n_labels), self.px_r
+            )  # px_r gets transposed - last dimension is nb genes
+        elif self.dispersion == "gene-batch":
+            px_r = F.linear(one_hot(batch_index, self.n_batch), self.px_r)
+        elif self.dispersion == "gene":
+            px_r = self.px_r
+
+        px_r = torch.exp(px_r)
+
+        if self.gene_likelihood == "zinb":
+            px = ZeroInflatedNegativeBinomial(
+                mu=px_rate,
+                theta=px_r,
+                zi_logits=px_dropout,
+                scale=px_scale,
+            )
+        elif self.gene_likelihood == "nb":
+            px = NegativeBinomial(mu=px_rate, theta=px_r, scale=px_scale)
+        elif self.gene_likelihood == "poisson":
+            px = Poisson(px_rate, scale=px_scale)
+
+        # Priors
+        if self.use_observed_lib_size:
+            pl = None
+        else:
+            (
+                local_library_log_means,
+                local_library_log_vars,
+            ) = self._compute_local_library_params(batch_index)
+            pl = Normal(local_library_log_means, local_library_log_vars.sqrt())
+        
+        ###### fix, add VampPrior
+        if self.use_vampprior:
+            device = self.device
+            if cat_covs is not None:
+                cat_covs_zero = torch.zeros([self.number_vp_components,cat_covs.shape[1]])-1
+                cat_covs_zero = cat_covs_zero.to(device)
+                if self.encode_covariates:
+                    categorical_input = torch.split(cat_covs_zero, 1, dim=1) ## 按列分割，组合成tuple对象
+                else:
+                    categorical_input = tuple()
+            else:
+                categorical_input = tuple()
+            ## convert input batch_index and categorical_input all equal to zero
+            batch_index_zero = torch.zeros([self.number_vp_components,1])-1
+            batch_index_zero = batch_index_zero.to(device)
+            q = self.z_encoder.encoder(self.means(self.idle_input).to(device), batch_index_zero, *categorical_input) ## encode distribution of z and z
+            
+            ## get location parameter
+            z_p_mean = self.z_encoder.mean_encoder(q)
+            z_p_logvar = self.z_encoder.var_encoder(q)
+            g_outputs = dict(
+            px=px,
+            pl=pl,
+            z_p_mean = z_p_mean,
+            z_p_logvar = z_p_logvar,
+            )
+        else:
+            pz = Normal(torch.zeros_like(z), torch.ones_like(z)) ## 这里的prior是standard multivariate distribution，需要改成VampPrior的部分   
+            g_outputs = dict(
+            px=px,
+            pl=pl,
+            pz=pz,
+            ) 
+        ##########################
+
+        return g_outputs
+
+    def vp_kl(self,inference_outputs, generative_outputs):
+        z = inference_outputs["z"]
+        z_q_mean = inference_outputs["z_q_mean"]
+        z_q_logvar = inference_outputs["z_q_logvar"]
+        z_p_mean = generative_outputs["z_p_mean"]
+        z_p_logvar = generative_outputs["z_p_logvar"]
+        
+        log_q_z = log_Normal_diag(z, z_q_mean, z_q_logvar, dim=1)
+
+        z_expand = z.unsqueeze(1)
+        means = z_p_mean.unsqueeze(0)
+        logvars = z_p_logvar.unsqueeze(0)
+
+        a = log_Normal_diag(z_expand, means, logvars, dim=2) - math.log(self.number_vp_components)  # MB x C
+        a_max, _ = torch.max(a, 1)  # MB x 1
+
+        # calculte log-sum-exp
+        log_p_z = a_max + torch.log(torch.sum(torch.exp(a - a_max.unsqueeze(1)), 1))  # MB x 1
+        
+        KL = -(log_p_z - log_q_z)
+
+        return KL
+
+    def loss(
+        self,
+        tensors,
+        inference_outputs,
+        generative_outputs,
+        kl_weight: float = 1.0,
+    ):
+        """Computes the loss function for the model."""
+        x = tensors[REGISTRY_KEYS.X_KEY]
+        
+        if self.vampprior:
+            kl_divergence_z = self.vp_kl(inference_outputs, generative_outputs)
+        else:
+            kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(
+                dim=1
+                )
+    
+        if not self.use_observed_lib_size:
+            kl_divergence_l = kl(
+                inference_outputs["ql"],
+                generative_outputs["pl"],
+            ).sum(dim=1)
+        else:
+            kl_divergence_l = torch.tensor(0.0, device=x.device)
+
+        reconst_loss = -generative_outputs["px"].log_prob(x).sum(-1)
+
+        kl_local_for_warmup = kl_divergence_z
+        kl_local_no_warmup = kl_divergence_l
+
+        weighted_kl_local = kl_weight * kl_local_for_warmup + kl_local_no_warmup
+
+        loss = torch.mean(reconst_loss + weighted_kl_local)
+
+        kl_local = dict(
+            kl_divergence_l=kl_divergence_l, kl_divergence_z=kl_divergence_z
+        )
+        return LossOutput(
+            loss=loss, reconstruction_loss=reconst_loss, kl_local=kl_local
+        )
+
+    @torch.inference_mode()
+    def sample(
+        self,
+        tensors,
+        n_samples=1,
+        library_size=1,
+    ) -> np.ndarray:
         r"""
-        The forward computation for a single sample.
+        Generate observation samples from the posterior predictive distribution.
 
-         #. Encodes the data into latent space using the encoder network
-         #. Generates a mean \\( q_m \\) and variance \\( q_v \\)
-         #. Samples a new value from an i.i.d. latent distribution
-
-        The dictionary ``latent`` contains the samples of the latent variables, while ``untran_latent``
-        contains the untransformed versions of these latent variables. For example, the library size is log normally distributed,
-        so ``untran_latent["l"]`` gives the normal sample that was later exponentiated to become ``latent["l"]``.
-        The logistic normal distribution is equivalent to applying softmax to a normal sample.
+        The posterior predictive distribution is written as :math:`p(\hat{x} \mid x)`.
 
         Parameters
         ----------
-        data
-            tensor with shape ``(n_input,)``
-        cat_list
-            list of category membership(s) for this sample
+        tensors
+            Tensors dict
+        n_samples
+            Number of required samples for each cell
+        library_size
+            Library size to scale samples to
 
         Returns
         -------
-        6-tuple. First 4 of :py:class:`torch.Tensor`, next 2 are `dict` of :py:class:`torch.Tensor`
-            tensors of shape ``(n_latent,)`` for mean and var, and sample
-
+        x_new : :py:class:`torch.Tensor`
+            tensor with shape (n_cells, n_genes, n_samples)
         """
-        # Parameters for latent distribution
-        q = self.encoder(data, *cat_list)
-        qz_m = self.z_mean_encoder(q)
-        qz_v = torch.exp(self.z_var_encoder(q)) + 1e-4
-        q_z = Normal(qz_m, qz_v.sqrt())
-        untran_z = q_z.rsample()
-        z = self.z_transformation(untran_z)
+        inference_kwargs = dict(n_samples=n_samples)
+        _, generative_outputs, = self.forward(
+            tensors,
+            inference_kwargs=inference_kwargs,
+            compute_loss=False,
+        )
 
-        ql_gene = self.l_gene_encoder(data, *cat_list)
-        ql_m = self.l_gene_mean_encoder(ql_gene)
-        ql_v = torch.exp(self.l_gene_var_encoder(ql_gene)) + 1e-4
-        q_l = Normal(ql_m, ql_v.sqrt())
-        log_library_gene = q_l.rsample()
-        log_library_gene = torch.clamp(log_library_gene, max=15)
-        library_gene = self.l_transformation(log_library_gene)
+        dist = generative_outputs["px"]
+        if self.gene_likelihood == "poisson":
+            l_train = generative_outputs["px"].rate
+            l_train = torch.clamp(l_train, max=1e8)
+            dist = torch.distributions.Poisson(
+                l_train
+            )  # Shape : (n_samples, n_cells_batch, n_genes)
+        if n_samples > 1:
+            exprs = dist.sample().permute(
+                [1, 2, 0]
+            )  # Shape : (n_cells_batch, n_genes, n_samples)
+        else:
+            exprs = dist.sample()
 
-        latent = {}
-        untran_latent = {}
-        latent["z"] = z
-        latent["l"] = library_gene
-        untran_latent["z"] = untran_z
-        untran_latent["l"] = log_library_gene
+        return exprs.cpu()
 
-        return q_z, q_l, latent, untran_latent
+    @torch.inference_mode()
+    @auto_move_data
+    def marginal_ll(self, tensors, n_mc_samples):
+        """Computes the marginal log likelihood of the model."""
+        sample_batch = tensors[REGISTRY_KEYS.X_KEY]
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
+
+        to_sum = torch.zeros(sample_batch.size()[0], n_mc_samples)
+
+        for i in range(n_mc_samples):
+            # Distribution parameters and sampled variables
+            inference_outputs, _, losses = self.forward(tensors)
+            qz = inference_outputs["qz"]
+            ql = inference_outputs["ql"]
+            z = inference_outputs["z"]
+            library = inference_outputs["library"]
+
+            # Reconstruction Loss
+            reconst_loss = losses.dict_sum(losses.reconstruction_loss)
+
+            # Log-probabilities
+            p_z = (
+                Normal(torch.zeros_like(qz.loc), torch.ones_like(qz.scale))
+                .log_prob(z)
+                .sum(dim=-1)
+            )
+            p_x_zl = -reconst_loss
+            q_z_x = qz.log_prob(z).sum(dim=-1)
+            log_prob_sum = p_z + p_x_zl - q_z_x
+
+            if not self.use_observed_lib_size:
+                (
+                    local_library_log_means,
+                    local_library_log_vars,
+                ) = self._compute_local_library_params(batch_index)
+
+                p_l = (
+                    Normal(local_library_log_means, local_library_log_vars.sqrt())
+                    .log_prob(library)
+                    .sum(dim=-1)
+                )
+                q_l_x = ql.log_prob(library).sum(dim=-1)
+
+                log_prob_sum += p_l - q_l_x
+
+            to_sum[:, i] = log_prob_sum
+
+        batch_log_lkl = logsumexp(to_sum, dim=-1) - np.log(n_mc_samples)
+        log_lkl = torch.sum(batch_log_lkl).item()
+        return log_lkl
+
+
+class LDVAE(VAE):
+    """
+    Linear-decoded Variational auto-encoder model.
+
+    Implementation of :cite:p:`Svensson20`.
+
+    This model uses a linear decoder, directly mapping the latent representation
+    to gene expression levels. It still uses a deep neural network to encode
+    the latent representation.
+
+    Compared to standard VAE, this model is less powerful, but can be used to
+    inspect which genes contribute to variation in the dataset. It may also be used
+    for all scVI tasks, like differential expression, batch correction, imputation, etc.
+    However, batch correction may be less powerful as it assumes a linear model.
+
+    Parameters
+    ----------
+    n_input
+        Number of input genes
+    n_batch
+        Number of batches
+    n_labels
+        Number of labels
+    n_hidden
+        Number of nodes per hidden layer (for encoder)
+    n_latent
+        Dimensionality of the latent space
+    n_layers_encoder
+        Number of hidden layers used for encoder NNs
+    dropout_rate
+        Dropout rate for neural networks
+    dispersion
+        One of the following
+
+        * ``'gene'`` - dispersion parameter of NB is constant per gene across cells
+        * ``'gene-batch'`` - dispersion can differ between different batches
+        * ``'gene-label'`` - dispersion can differ between different labels
+        * ``'gene-cell'`` - dispersion can differ for every gene in every cell
+    log_variational
+        Log(data+1) prior to encoding for numerical stability. Not normalization.
+    gene_likelihood
+        One of
+
+        * ``'nb'`` - Negative binomial distribution
+        * ``'zinb'`` - Zero-inflated negative binomial distribution
+        * ``'poisson'`` - Poisson distribution
+    use_batch_norm
+        Bool whether to use batch norm in decoder
+    bias
+        Bool whether to have bias term in linear decoder
+    """
+
+    def __init__(
+        self,
+        n_input: int,
+        n_batch: int = 0,
+        n_labels: int = 0,
+        n_hidden: int = 128,
+        n_latent: int = 10,
+        n_layers_encoder: int = 1,
+        dropout_rate: float = 0.1,
+        dispersion: str = "gene",
+        log_variational: bool = True,
+        gene_likelihood: str = "nb",
+        use_batch_norm: bool = True,
+        bias: bool = False,
+        latent_distribution: str = "normal",
+        **vae_kwargs,
+    ):
+        super().__init__(
+            n_input=n_input,
+            n_batch=n_batch,
+            n_labels=n_labels,
+            n_hidden=n_hidden,
+            n_latent=n_latent,
+            n_layers=n_layers_encoder,
+            dropout_rate=dropout_rate,
+            dispersion=dispersion,
+            log_variational=log_variational,
+            gene_likelihood=gene_likelihood,
+            latent_distribution=latent_distribution,
+            use_observed_lib_size=False,
+            **vae_kwargs,
+        )
+        self.use_batch_norm = use_batch_norm
+        self.z_encoder = Encoder(
+            n_input,
+            n_latent,
+            n_layers=n_layers_encoder,
+            n_hidden=n_hidden,
+            dropout_rate=dropout_rate,
+            distribution=latent_distribution,
+            use_batch_norm=True,
+            use_layer_norm=False,
+            return_dist=True,
+        )
+        self.l_encoder = Encoder(
+            n_input,
+            1,
+            n_layers=1,
+            n_hidden=n_hidden,
+            dropout_rate=dropout_rate,
+            use_batch_norm=True,
+            use_layer_norm=False,
+            return_dist=True,
+        )
+        self.decoder = LinearDecoderSCVI(
+            n_latent,
+            n_input,
+            n_cat_list=[n_batch],
+            use_batch_norm=use_batch_norm,
+            use_layer_norm=False,
+            bias=bias,
+        )
+
+    @torch.inference_mode()
+    def get_loadings(self) -> np.ndarray:
+        """Extract per-gene weights (for each Z, shape is genes by dim(Z)) in the linear decoder."""
+        # This is BW, where B is diag(b) batch norm, W is weight matrix
+        if self.use_batch_norm is True:
+            w = self.decoder.factor_regressor.fc_layers[0][0].weight
+            bn = self.decoder.factor_regressor.fc_layers[0][1]
+            sigma = torch.sqrt(bn.running_var + bn.eps)
+            gamma = bn.weight
+            b = gamma / sigma
+            b_identity = torch.diag(b)
+            loadings = torch.matmul(b_identity, w)
+        else:
+            loadings = self.decoder.factor_regressor.fc_layers[0][0].weight
+        loadings = loadings.detach().cpu().numpy()
+        if self.n_batch > 1:
+            loadings = loadings[:, : -self.n_batch]
+
+        return loadings
