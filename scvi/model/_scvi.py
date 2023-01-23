@@ -109,8 +109,6 @@ class SCVI(
         dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "zinb",
         latent_distribution: Literal["normal", "ln"] = "normal",
-        use_vampprior: bool = False,
-        number_vp_components: int = 10,
         **model_kwargs,
     ):
         super().__init__(adata)
@@ -148,14 +146,12 @@ class SCVI(
             use_size_factor_key=use_size_factor_key,
             library_log_means=library_log_means,
             library_log_vars=library_log_vars,
-            use_vampprior = use_vampprior,
-            number_vp_components = number_vp_components,
             **model_kwargs,
         )
         self.module.latent_data_type = self.latent_data_type
         self._model_summary_string = (
             "SCVI Model with the following params: \nn_hidden: {}, n_latent: {}, n_layers: {}, dropout_rate: "
-            "{}, dispersion: {}, gene_likelihood: {}, latent_distribution: {}, use_VamPprior: {}, n_VampPrior_comp: {}"
+            "{}, dispersion: {}, gene_likelihood: {}, latent_distribution: {}"
         ).format(
             n_hidden,
             n_latent,
@@ -164,8 +160,6 @@ class SCVI(
             dispersion,
             gene_likelihood,
             latent_distribution,
-            use_vampprior,
-            number_vp_components,
         )
         self.init_params_ = self._get_init_params(locals())
 
