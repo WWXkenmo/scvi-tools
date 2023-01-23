@@ -41,6 +41,8 @@ class ArchesMixin:
         freeze_batchnorm_encoder: bool = True,
         freeze_batchnorm_decoder: bool = False,
         freeze_classifier: bool = True,
+        use_vampprior: bool = True,
+        number_vp_components: int = 10,
     ):
         """
         Online update of a reference model with scArches algorithm :cite:p:`Lotfollahi21`.
@@ -155,8 +157,9 @@ class ArchesMixin:
         ### Vamp_prior currently only work on scVI model
         class_Name = str(model.__class__).replace("'>","")
         class_Name = class_Name.split(".")[3]
-        if class_Name == "SCVI":
+        if class_Name == "SCVI" and use_vampprior:
             model.module.use_vampprior = True
+            model.module.number_vp_components = number_vp_components
             model.module.add_pseudoinputs(model.module.n_input)
         
         ### regenerate the summary string
