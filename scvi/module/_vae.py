@@ -519,7 +519,7 @@ class VAE(BaseLatentModeModuleClass):
         """Computes the loss function for the model."""
         x = tensors[REGISTRY_KEYS.X_KEY]
         
-        if self.vampprior:
+        if self.use_vampprior:
             kl_divergence_z = self.vp_kl(inference_outputs, generative_outputs)
         else:
             kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(
