@@ -450,7 +450,7 @@ class VAE(BaseLatentModeModuleClass):
         
         ###### fix, add VampPrior
         if self.use_vampprior:
-            device = z.device
+            device = self.device
             if cat_covs is not None:
                 cat_covs_zero = torch.zeros([self.number_vp_components,cat_covs.shape[1]])-1
                 cat_covs_zero = cat_covs_zero.to(device)
