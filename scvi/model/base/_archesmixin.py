@@ -154,7 +154,7 @@ class ArchesMixin:
         class_Name = class_Name.split(".")[3]
         if class_Name == "SCVI":
             model.use_vampprior = True
-            self.add_pseudoinputs(self.n_input)
+            model.add_pseudoinputs(self.n_input)
             
         return model
 
