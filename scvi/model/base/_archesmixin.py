@@ -43,6 +43,8 @@ class ArchesMixin:
         freeze_classifier: bool = True,
         use_vampprior: bool = True,
         number_vp_components: int = 10,
+        vp_mean: float = 0.1,
+        vp_var: float = 0.02,
     ):
         """
         Online update of a reference model with scArches algorithm :cite:p:`Lotfollahi21`.
@@ -160,7 +162,7 @@ class ArchesMixin:
         if class_Name == "SCVI" and use_vampprior:
             model.module.use_vampprior = True
             model.module.number_vp_components = number_vp_components
-            model.module.add_pseudoinputs(model.module.n_input)
+            model.module.add_pseudoinputs(model.module.n_input,mean = vp_mean, var = vp_var)
             ### regenerate the summary string
             model._model_summary_string = model._model_summary_string.replace("use_VamPprior: False","use_VamPprior: True")
             strr = "n_vp_comp: "+str(number_vp_components)
