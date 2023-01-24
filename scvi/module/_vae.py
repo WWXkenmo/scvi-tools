@@ -511,7 +511,7 @@ class VAE(BaseLatentModeModuleClass):
         
         KL = -(log_p_z - log_q_z)
 
-        return KL
+        return KL,log_p_z, log_q_z
 
     def loss(
         self,
@@ -524,7 +524,7 @@ class VAE(BaseLatentModeModuleClass):
         x = tensors[REGISTRY_KEYS.X_KEY]
         
         if self.use_vampprior:
-            kl_divergence_z = self.vp_kl(inference_outputs, generative_outputs)
+            kl_divergence_z,_,_ = self.vp_kl(inference_outputs, generative_outputs)
         else:
             kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(
                 dim=1
