@@ -228,7 +228,7 @@ class VAE(BaseLatentModeModuleClass):
     def add_pseudoinputs(self,n_input):
         nonlinearity = torch.nn.ReLU()
         self.means = NonLinear(self.number_vp_components, n_input, bias=False, activation=nonlinearity)
-        normal_init(self.means.linear, -0.05, 0.01)
+        #normal_init(self.means.linear, -0.05, 0.01)
         self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)        
 
     def _get_inference_input(
