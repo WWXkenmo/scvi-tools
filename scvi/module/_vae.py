@@ -123,6 +123,8 @@ class VAE(BaseLatentModeModuleClass):
         var_activation: Optional[Callable] = None,
         use_vampprior: bool = False,
         number_vp_components: Tunable[int] = 10,
+        vp_mean: Tunable[float] = 0.1,
+        vp_var: Tunable[float] = 0.02,
     ):
         super().__init__()
         self.dispersion = dispersion
@@ -223,12 +225,12 @@ class VAE(BaseLatentModeModuleClass):
         self.n_input = n_input
         self.number_vp_components = number_vp_components
         if self.use_vampprior:
-            self.add_pseudoinputs(n_input)
+            self.add_pseudoinputs(n_input,vp_mean,vp_var)
 
-    def add_pseudoinputs(self,n_input):
+    def add_pseudoinputs(self,n_input,mean,var):
         self.means = FCLayers(self.number_vp_components, n_input,bias = False, use_batch_norm = False)
         #normal_init(self.means.linear, self.args.pseudoinputs_mean, self.args.pseudoinputs_std)
-        self.means.fc_layers[0][0].weight.data.normal_(0.1,0.02)
+        self.means.fc_layers[0][0].weight.data.normal_(mean,var)
         self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)        
 
     def _get_inference_input(
