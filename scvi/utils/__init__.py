@@ -4,7 +4,7 @@ from ._docstrings import setup_anndata_dsp
 from ._exceptions import InvalidParameterError
 from ._jax import device_selecting_PRNGKey
 from ._track import track
-from ._vamp_utils import reparameterize, log_Normal_diag
+from ._vamp_utils import reparameterize, log_Normal_diag, NonLinear, normal_init
 
 __all__ = [
     "track",
@@ -15,4 +15,6 @@ __all__ = [
     "InvalidParameterError",
     "reparameterize",
     "log_Normal_diag",
+    "NonLinear",
+    "normal_init",
 ]
