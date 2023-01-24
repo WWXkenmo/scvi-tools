@@ -614,7 +614,7 @@ class VAE(BaseLatentModeModuleClass):
 
         for i in range(n_mc_samples):
             # Distribution parameters and sampled variables
-            inference_outputs, _, losses = self.forward(tensors)
+            inference_outputs, generative_outputs, losses = self.forward(tensors)
             qz = inference_outputs["qz"]
             ql = inference_outputs["ql"]
             z = inference_outputs["z"]
@@ -624,13 +624,17 @@ class VAE(BaseLatentModeModuleClass):
             reconst_loss = losses.dict_sum(losses.reconstruction_loss)
 
             # Log-probabilities
-            p_z = (
-                Normal(torch.zeros_like(qz.loc), torch.ones_like(qz.scale))
-                .log_prob(z)
-                .sum(dim=-1)
-            )
-            p_x_zl = -reconst_loss
-            q_z_x = qz.log_prob(z).sum(dim=-1)
+            if self.use_vampprior:
+                kl_divergence_z,p_z, q_z_x = self.vp_kl(inference_outputs, generative_outputs)
+            else:
+                p_z = (
+                    Normal(torch.zeros_like(qz.loc), torch.ones_like(qz.scale))
+                    .log_prob(z)
+                    .sum(dim=-1)
+                )
+                p_x_zl = -reconst_loss
+                q_z_x = qz.log_prob(z).sum(dim=-1)
+                
             log_prob_sum = p_z + p_x_zl - q_z_x
 
             if not self.use_observed_lib_size:
