@@ -15,7 +15,7 @@ from scvi.autotune._types import Tunable
 from scvi.distributions import NegativeBinomial, Poisson, ZeroInflatedNegativeBinomial
 from scvi.module.base import BaseLatentModeModuleClass, LossOutput, auto_move_data
 from scvi.nn import DecoderSCVI, Encoder, LinearDecoderSCVI, one_hot, FCLayers
-from scvi.utils import reparameterize, log_Normal_diag 
+from scvi.utils import reparameterize, log_Normal_diag, NonLinear, normal_init
 
 torch.backends.cudnn.benchmark = True
 
@@ -226,8 +226,9 @@ class VAE(BaseLatentModeModuleClass):
             self.add_pseudoinputs(n_input)
 
     def add_pseudoinputs(self,n_input):
-        self.means = FCLayers(self.number_vp_components, n_input,bias = False)
-        #normal_init(self.means.linear, self.args.pseudoinputs_mean, self.args.pseudoinputs_std)
+        nonlinearity = nn.ReLU()
+        self.means = NonLinear(self.number_vp_components, n_input, bias=False, activation=nonlinearity)
+        normal_init(self.means.linear, -0.05, 0.01)
         self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)        
 
     def _get_inference_input(
