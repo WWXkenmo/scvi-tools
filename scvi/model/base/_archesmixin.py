@@ -164,7 +164,7 @@ class ArchesMixin:
             ### regenerate the summary string
             model._model_summary_string = model._model_summary_string.replace("use_VamPprior: False","use_VamPprior: True")
             strr = "n_vp_comp: "+str(number_vp_components)
-            model._model_summary_string = model._model_summary_string.replace("n_vp_comp: 20",strr)
+            model._model_summary_string = model._model_summary_string.replace("n_vp_comp: 10",strr)
             
         return model
 
