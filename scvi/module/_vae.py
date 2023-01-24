@@ -226,8 +226,9 @@ class VAE(BaseLatentModeModuleClass):
             self.add_pseudoinputs(n_input)
 
     def add_pseudoinputs(self,n_input):
-        self.means = FCLayers(self.number_vp_components, n_input,bias = False, use_batch_norm = False, dropout_rate = 0)
+        self.means = FCLayers(self.number_vp_components, n_input,bias = False, use_batch_norm = False)
         #normal_init(self.means.linear, self.args.pseudoinputs_mean, self.args.pseudoinputs_std)
+        self.means.fc_layers[0][0].weight.data.normal_(0.1,0.02)
         self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)        
 
     def _get_inference_input(
