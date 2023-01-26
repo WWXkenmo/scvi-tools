@@ -178,6 +178,13 @@ class VAE(BaseLatentModeModuleClass):
         n_input_encoder = n_input + n_continuous_cov * encode_covariates
         cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
         encoder_cat_list = cat_list if encode_covariates else None
+
+        ### add vamp prior
+        self.use_vampprior = use_vampprior
+        self.number_vp_components = number_vp_components
+        if self.use_vampprior:
+            self.add_pseudoinputs(n_input_encoder,sum(encode_cat_list),vp_mean,vp_var)
+
         self.z_encoder = Encoder(
             n_input_encoder,
             n_latent,
@@ -190,6 +197,8 @@ class VAE(BaseLatentModeModuleClass):
             use_batch_norm=use_batch_norm_encoder,
             use_layer_norm=use_layer_norm_encoder,
             var_activation=var_activation,
+            use_vampprior = use_vampprior,
+            surgery_comp = self.means_surgery_comp(self.idle_input.to(self.device))
             return_dist=True,
         )
         # l encoder goes from n_input-dimensional data to 1-d library size
@@ -226,10 +235,15 @@ class VAE(BaseLatentModeModuleClass):
         if self.use_vampprior:
             self.add_pseudoinputs(self.z_encoder.encoder.fc_layers[0][0].in_features,vp_mean,vp_var)
 
-    def add_pseudoinputs(self,n_input,mean,var):
-        self.means = FCLayers(self.number_vp_components, n_input,bias = False, use_batch_norm = False, dropout_rate = 0)
+    def add_pseudoinputs(self,n_input1,n_input2,mean,var):
+        self.means = FCLayers(self.number_vp_components, n_input1,bias = False, use_batch_norm = False, dropout_rate = 0)
         #normal_init(self.means.linear, self.args.pseudoinputs_mean, self.args.pseudoinputs_std)
         self.means.fc_layers[0][0].weight.data.normal_(mean,var)
+
+        self.means_surgery_comp = FCLayers(self.number_vp_components, n_input2,bias = False, use_batch_norm = False, dropout_rate = 0)
+        #normal_init(self.means.linear, self.args.pseudoinputs_mean, self.args.pseudoinputs_std)
+        self.means_surgery_comp.fc_layers[0][0].weight.data.normal_(mean,var)
+        
         self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)        
 
     def _get_inference_input(
