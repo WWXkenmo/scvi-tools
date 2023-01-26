@@ -255,7 +255,7 @@ class FCLayers_encode(nn.Module):
         else:
             self.n_cat_list = []
         
-        if use_vampprior:
+        if self.surgey_comp == None:
             self.surgey_comp = surgery_comp
 
         cat_dim = sum(self.n_cat_list)
