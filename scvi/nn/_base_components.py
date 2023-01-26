@@ -337,8 +337,8 @@ class FCLayers_encode(nn.Module):
         """
 
         if use_vampprior:
-            save_n_cat_list =  self.n_cat_list
-            self.n_cat_list = []
+            #save_n_cat_list =  self.n_cat_list
+            #self.n_cat_list = []
             one_hot_cat_list = self.surgery_comp
         else:
             one_hot_cat_list = []  # for generality in this list many indices useless.
@@ -385,8 +385,8 @@ class FCLayers_encode(nn.Module):
                                 one_hot_cat_list_layer = one_hot_cat_list
                             x = torch.cat((x, *one_hot_cat_list_layer), dim=-1)
                         x = layer(x)
-        if use_vampprior:
-            self.n_cat_list = save_n_cat_list
+        #if use_vampprior:
+        #    self.n_cat_list = save_n_cat_list
 
         return x
 
