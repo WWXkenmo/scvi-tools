@@ -128,7 +128,8 @@ class ArchesMixin:
             )
 
         model.to_device(device)
-
+        model.module.to(device)
+        
         # model tweaking
         new_state_dict = model.module.state_dict()
         for key, load_ten in load_state_dict.items():
