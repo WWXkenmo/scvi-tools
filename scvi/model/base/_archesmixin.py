@@ -162,7 +162,7 @@ class ArchesMixin:
         if class_Name == "SCVI" and use_vampprior:
             model.module.use_vampprior = True
             model.module.number_vp_components = number_vp_components
-            sugery_number = model.module.z_encoder.encoder.fc_layers[0][0].in_features - model.module.n_input_feature
+            surgery_number = model.module.z_encoder.encoder.fc_layers[0][0].in_features - model.module.n_input_feature
             model.module.add_pseudoinputs(model.module.n_input_feature,surgery_number,mean = vp_mean, var = vp_var)
             model.module.z_encoder.surgery_comp = model.module.means_surgery_comp(self.idle_input.to(self.device))
             ### regenerate the summary string
