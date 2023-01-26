@@ -184,7 +184,10 @@ class VAE(BaseLatentModeModuleClass):
         self.number_vp_components = number_vp_components
         if self.use_vampprior:
             self.add_pseudoinputs(n_input_encoder,sum(encode_cat_list),vp_mean,vp_var)
-
+            surgery_comp = self.means_surgery_comp(self.idle_input.to(self.device))
+        else:
+            surgery_comp = None
+            
         self.z_encoder = Encoder(
             n_input_encoder,
             n_latent,
@@ -198,7 +201,7 @@ class VAE(BaseLatentModeModuleClass):
             use_layer_norm=use_layer_norm_encoder,
             var_activation=var_activation,
             use_vampprior = use_vampprior,
-            surgery_comp = self.means_surgery_comp(self.idle_input.to(self.device)),
+            surgery_comp = surgery_comp,
             return_dist=True,
         )
         # l encoder goes from n_input-dimensional data to 1-d library size
