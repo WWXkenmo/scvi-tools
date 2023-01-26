@@ -254,9 +254,6 @@ class FCLayers_encode(nn.Module):
             self.n_cat_list = [n_cat if n_cat > 1 else 0 for n_cat in n_cat_list]
         else:
             self.n_cat_list = []
-        
-        if self.surgery_comp == None:
-            self.surgery_comp = surgery_comp
 
         cat_dim = sum(self.n_cat_list)
         self.fc_layers = nn.Sequential(
