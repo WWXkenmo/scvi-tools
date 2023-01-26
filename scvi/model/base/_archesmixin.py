@@ -128,7 +128,7 @@ class ArchesMixin:
             )
 
         model.to_device(device)
-        model.module.to(device)
+        model.module.device_record = device
         
         # model tweaking
         new_state_dict = model.module.state_dict()
