@@ -128,7 +128,6 @@ class ArchesMixin:
             )
 
         model.to_device(device)
-        model.module.device_record = device
         
         # model tweaking
         new_state_dict = model.module.state_dict()
@@ -165,12 +164,13 @@ class ArchesMixin:
             model.module.number_vp_components = number_vp_components
             surgery_number = model.module.z_encoder.encoder.fc_layers[0][0].in_features - model.module.n_input_feature
             model.module.add_pseudoinputs(model.module.n_input_feature,surgery_number,mean = vp_mean, var = vp_var)
-            #model.module.z_encoder.encoder.surgery_comp = model.module.means_surgery_comp(model.module.idle_input)
+            model.module.z_encoder.encoder.surgery_comp = model.module.means_surgery_comp(model.module.idle_input.to(device))
             ### regenerate the summary string
             model._model_summary_string = model._model_summary_string.replace("use_VamPprior: False","use_VamPprior: True")
             strr = "n_vp_comp: "+str(number_vp_components)
             model._model_summary_string = model._model_summary_string.replace("n_vp_comp: 10",strr)
-            
+        
+        model.to_device(device)
         return model
 
     @staticmethod
