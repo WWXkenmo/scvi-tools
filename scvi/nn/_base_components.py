@@ -61,6 +61,7 @@ class FCLayers(nn.Module):
         bias: bool = True,
         inject_covariates: bool = True,
         activation_fn: nn.Module = nn.ReLU,
+        use_vampprior: bool = False
     ):
         super().__init__()
         self.inject_covariates = inject_covariates
@@ -71,7 +72,7 @@ class FCLayers(nn.Module):
             self.n_cat_list = [n_cat if n_cat > 1 else 0 for n_cat in n_cat_list]
         else:
             self.n_cat_list = []
-
+            
         cat_dim = sum(self.n_cat_list)
         self.fc_layers = nn.Sequential(
             collections.OrderedDict(
@@ -134,7 +135,7 @@ class FCLayers(nn.Module):
                     b = layer.bias.register_hook(_hook_fn_zero_out)
                     self.hooks.append(b)
 
-    def forward(self, x: torch.Tensor, *cat_list: int):
+    def forward(self, x: torch.Tensor, use_vampprior:bool = False,  *cat_list: int):
         """
         Forward computation on ``x``.
 
@@ -142,6 +143,8 @@ class FCLayers(nn.Module):
         ----------
         x
             tensor of values with shape ``(n_in,)``
+        use_vampprior
+            when use vampprior, we set n_cat_list=[]
         cat_list
             list of category membership(s) for this sample
 
@@ -150,6 +153,11 @@ class FCLayers(nn.Module):
         :class:`torch.Tensor`
             tensor of shape ``(n_out,)``
         """
+
+        if use_vampprior:
+            save_n_cat_list =  self.n_cat_list
+            self.n_cat_list = []
+            
         one_hot_cat_list = []  # for generality in this list many indices useless.
 
         if len(self.n_cat_list) > len(cat_list):
@@ -165,6 +173,7 @@ class FCLayers(nn.Module):
                 else:
                     one_hot_cat = cat  # cat has already been one_hot encoded
                 one_hot_cat_list += [one_hot_cat]
+
         for i, layers in enumerate(self.fc_layers):
             for layer in layers:
                 if layer is not None:
@@ -188,6 +197,9 @@ class FCLayers(nn.Module):
                                 one_hot_cat_list_layer = one_hot_cat_list
                             x = torch.cat((x, *one_hot_cat_list_layer), dim=-1)
                         x = layer(x)
+        if use_vampprior:
+            self.n_cat_list = save_n_cat_list
+
         return x
 
 
@@ -265,7 +277,7 @@ class Encoder(nn.Module):
             self.z_transformation = _identity
         self.var_activation = torch.exp if var_activation is None else var_activation
 
-    def forward(self, x: torch.Tensor, *cat_list: int):
+    def forward(self, x: torch.Tensor, use_vampprior:bool = False, *cat_list: int):
         r"""
         The forward computation for a single sample.
 
@@ -287,7 +299,7 @@ class Encoder(nn.Module):
 
         """
         # Parameters for latent distribution
-        q = self.encoder(x, *cat_list)
+        q = self.encoder(x, use_vampprior, *cat_list)
         q_m = self.mean_encoder(q)
         q_v = self.var_activation(self.var_encoder(q)) + self.var_eps
         dist = Normal(q_m, q_v.sqrt())
