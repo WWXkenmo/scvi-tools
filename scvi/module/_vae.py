@@ -198,7 +198,7 @@ class VAE(BaseLatentModeModuleClass):
             use_layer_norm=use_layer_norm_encoder,
             var_activation=var_activation,
             use_vampprior = use_vampprior,
-            surgery_comp = self.means_surgery_comp(self.idle_input.to(self.device))
+            surgery_comp = self.means_surgery_comp(self.idle_input.to(self.device)),
             return_dist=True,
         )
         # l encoder goes from n_input-dimensional data to 1-d library size
