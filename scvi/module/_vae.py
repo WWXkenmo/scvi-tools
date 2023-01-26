@@ -222,10 +222,9 @@ class VAE(BaseLatentModeModuleClass):
 
         ### add vamp prior
         self.use_vampprior = use_vampprior
-        self.n_input = n_input
         self.number_vp_components = number_vp_components
         if self.use_vampprior:
-            self.add_pseudoinputs(n_input,vp_mean,vp_var)
+            self.add_pseudoinputs(self.z_encoder.encoder.fc_layers[0][0].in_features,vp_mean,vp_var)
 
     def add_pseudoinputs(self,n_input,mean,var):
         self.means = FCLayers(self.number_vp_components, n_input,bias = False, use_batch_norm = False, dropout_rate = 0)
@@ -331,7 +330,7 @@ class VAE(BaseLatentModeModuleClass):
             categorical_input = torch.split(cat_covs, 1, dim=1)
         else:
             categorical_input = tuple()
-        qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input)
+        qz, z = self.z_encoder(encoder_input, False,batch_index, *categorical_input)
         ql = None
         if not self.use_observed_lib_size:
             ql, library_encoded = self.l_encoder(
@@ -350,7 +349,7 @@ class VAE(BaseLatentModeModuleClass):
                 library = ql.sample((n_samples,))
         
         if self.use_vampprior:
-            q = self.z_encoder.encoder(encoder_input, batch_index, *categorical_input)
+            q = self.z_encoder.encoder(encoder_input, False, batch_index, *categorical_input)
             z_q_mean = self.z_encoder.mean_encoder(q)
             z_q_logvar = self.z_encoder.var_encoder(q)
             z = reparameterize(z_q_mean,z_q_logvar)
@@ -466,9 +465,9 @@ class VAE(BaseLatentModeModuleClass):
             else:
                 categorical_input = tuple()
             ## convert input batch_index and categorical_input all equal to zero
-            batch_index_zero = torch.zeros([self.number_vp_components,1])-1
-            batch_index_zero = batch_index_zero.to(device)
-            q = self.z_encoder.encoder(self.means(self.idle_input.to(device)), batch_index_zero, *categorical_input) ## encode distribution of z and z
+            #batch_index_zero = torch.zeros([self.number_vp_components,1])-1
+            #batch_index_zero = batch_index_zero.to(device)
+            q = self.z_encoder.encoder(self.means(self.idle_input.to(device)), use_vampprior = self.use_vampprior, *categorical_input) ## encode distribution of z and z
             
             ## get location parameter
             z_p_mean = self.z_encoder.mean_encoder(q)
