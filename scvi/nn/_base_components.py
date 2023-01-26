@@ -358,7 +358,7 @@ class FCLayers_encode(nn.Module):
 
         for i, layers in enumerate(self.fc_layers):
             for layer in layers:
-                for i == 0 and use_vampprior:
+                if i == 0 and use_vampprior:
                     one_hot_cat_list = []
                 else:
                     one_hot_cat_list = real_one_hot_cat_list
