@@ -233,10 +233,10 @@ class VAE(BaseLatentModeModuleClass):
         )
 
         ### add vamp prior
-        self.use_vampprior = use_vampprior
-        self.number_vp_components = number_vp_components
-        if self.use_vampprior:
-            self.add_pseudoinputs(self.z_encoder.encoder.fc_layers[0][0].in_features,vp_mean,vp_var)
+        #self.use_vampprior = use_vampprior
+        #self.number_vp_components = number_vp_components
+        #if self.use_vampprior:
+        #    self.add_pseudoinputs(self.z_encoder.encoder.fc_layers[0][0].in_features,vp_mean,vp_var)
 
     def add_pseudoinputs(self,n_input1,n_input2,mean,var):
         self.means = FCLayers(self.number_vp_components, n_input1,bias = False, use_batch_norm = False, dropout_rate = 0)
