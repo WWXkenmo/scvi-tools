@@ -383,7 +383,11 @@ class FCLayers_encode(nn.Module):
                                 ]
                             else:
                                 one_hot_cat_list_layer = one_hot_cat_list
-                            x = torch.cat((x, *one_hot_cat_list_layer), dim=-1)
+                                
+                            if use_vampprior:
+                                x = torch.cat((x, one_hot_cat_list_layer), dim=-1)
+                            else:
+                                x = torch.cat((x, *one_hot_cat_list_layer), dim=-1)
                         x = layer(x)
         #if use_vampprior:
         #    self.n_cat_list = save_n_cat_list
