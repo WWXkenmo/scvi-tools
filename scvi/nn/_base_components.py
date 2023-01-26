@@ -242,7 +242,8 @@ class FCLayers_encode(nn.Module):
         bias: bool = True,
         inject_covariates: bool = True,
         activation_fn: nn.Module = nn.ReLU,
-        use_vampprior: bool = False
+        use_vampprior: bool = False,
+        surgery_comp: torch.Tensor = None,
     ):
         super().__init__()
         self.inject_covariates = inject_covariates
@@ -253,7 +254,10 @@ class FCLayers_encode(nn.Module):
             self.n_cat_list = [n_cat if n_cat > 1 else 0 for n_cat in n_cat_list]
         else:
             self.n_cat_list = []
-            
+        
+        if use_vampprior:
+            self.surgey_comp = surgery_comp
+
         cat_dim = sum(self.n_cat_list)
         self.fc_layers = nn.Sequential(
             collections.OrderedDict(
@@ -338,22 +342,23 @@ class FCLayers_encode(nn.Module):
         if use_vampprior:
             save_n_cat_list =  self.n_cat_list
             self.n_cat_list = []
-            
-        one_hot_cat_list = []  # for generality in this list many indices useless.
+            one_hot_cat_list = self.surgery_comp
+        else:
+            one_hot_cat_list = []  # for generality in this list many indices useless.
 
-        if len(self.n_cat_list) > len(cat_list):
-            raise ValueError(
-                "nb. categorical args provided doesn't match init. params."
-            )
-        for n_cat, cat in zip(self.n_cat_list, cat_list):
-            if n_cat and cat is None:
-                raise ValueError("cat not provided while n_cat != 0 in init. params.")
-            if n_cat > 1:  # n_cat = 1 will be ignored - no additional information
-                if cat.size(1) != n_cat:
-                    one_hot_cat = one_hot(cat, n_cat)
-                else:
-                    one_hot_cat = cat  # cat has already been one_hot encoded
-                one_hot_cat_list += [one_hot_cat]
+            if len(self.n_cat_list) > len(cat_list):
+                raise ValueError(
+                    "nb. categorical args provided doesn't match init. params."
+                )
+            for n_cat, cat in zip(self.n_cat_list, cat_list):
+                if n_cat and cat is None:
+                    raise ValueError("cat not provided while n_cat != 0 in init. params.")
+                if n_cat > 1:  # n_cat = 1 will be ignored - no additional information
+                    if cat.size(1) != n_cat:
+                        one_hot_cat = one_hot(cat, n_cat)
+                    else:
+                        one_hot_cat = cat  # cat has already been one_hot encoded
+                    one_hot_cat_list += [one_hot_cat]
         #real_one_hot_cat_list = one_hot_cat_list
 
         for i, layers in enumerate(self.fc_layers):
@@ -438,6 +443,8 @@ class Encoder(nn.Module):
         var_eps: float = 1e-4,
         var_activation: Optional[Callable] = None,
         return_dist: bool = False,
+        use_vampprior: bool = False,
+        surgery_comp: torch.Tensor = None,
         **kwargs,
     ):
         super().__init__()
@@ -451,6 +458,8 @@ class Encoder(nn.Module):
             n_layers=n_layers,
             n_hidden=n_hidden,
             dropout_rate=dropout_rate,
+            use_vampprior = use_vampprior,
+            surgery_comp = surgery_comp,
             **kwargs,
         )
         self.mean_encoder = nn.Linear(n_hidden, n_output)
