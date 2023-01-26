@@ -164,7 +164,7 @@ class ArchesMixin:
             model.module.number_vp_components = number_vp_components
             surgery_number = model.module.z_encoder.encoder.fc_layers[0][0].in_features - model.module.n_input_feature
             model.module.add_pseudoinputs(model.module.n_input_feature,surgery_number,mean = vp_mean, var = vp_var)
-            model.module.z_encoder.surgery_comp = model.module.means_surgery_comp(model.module.idle_input.to(device))
+            model.module.z_encoder.surgery_comp = model.module.means_surgery_comp(model.module.idle_input)
             ### regenerate the summary string
             model._model_summary_string = model._model_summary_string.replace("use_VamPprior: False","use_VamPprior: True")
             strr = "n_vp_comp: "+str(number_vp_components)
