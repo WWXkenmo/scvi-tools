@@ -340,7 +340,7 @@ class FCLayers_encode(nn.Module):
             #save_n_cat_list =  self.n_cat_list
             #self.n_cat_list = []
             one_hot_cat_list = self.surgery_comp
-            if self.inject_covariates:
+            if not self.inject_covariates:
                 one_hot_cat_list = []  # for generality in this list many indices useless.  
         else:
             one_hot_cat_list = []  # for generality in this list many indices useless.
