@@ -341,24 +341,7 @@ class FCLayers_encode(nn.Module):
             #self.n_cat_list = []
             one_hot_cat_list = self.surgery_comp
             if self.inject_covariates:
-                save_n_cat_list =  self.n_cat_list.copy()
-                self.n_cat_list = []
-                
-                one_hot_cat_list = []  # for generality in this list many indices useless.
-                if len(self.n_cat_list) > len(cat_list):
-                    raise ValueError(
-                        "nb. categorical args provided doesn't match init. params."
-                    )
-                for n_cat, cat in zip(self.n_cat_list, cat_list):
-                    if n_cat and cat is None:
-                        raise ValueError("cat not provided while n_cat != 0 in init. params.")
-                    if n_cat > 1:  # n_cat = 1 will be ignored - no additional information
-                        if cat.size(1) != n_cat:
-                            one_hot_cat = one_hot(cat, n_cat)
-                        else:
-                            one_hot_cat = cat  # cat has already been one_hot encoded
-                        one_hot_cat_list += [one_hot_cat]
-                self.n_cat_list = save_n_cat_list
+                one_hot_cat_list = []  # for generality in this list many indices useless.  
         else:
             one_hot_cat_list = []  # for generality in this list many indices useless.
 
