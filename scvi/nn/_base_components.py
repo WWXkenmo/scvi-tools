@@ -243,9 +243,9 @@ class FCLayers_encode(nn.Module):
         inject_covariates: bool = True,
         activation_fn: nn.Module = nn.ReLU,
         use_vampprior: bool = False,
-        surgery_comp: torch.Tensor = None,
     ):
         super().__init__()
+        self.surgery_comp = None
         self.inject_covariates = inject_covariates
         layers_dim = [n_in] + (n_layers - 1) * [n_hidden] + [n_out]
 
@@ -445,7 +445,6 @@ class Encoder(nn.Module):
         var_activation: Optional[Callable] = None,
         return_dist: bool = False,
         use_vampprior: bool = False,
-        surgery_comp: torch.Tensor = None,
         **kwargs,
     ):
         super().__init__()
@@ -460,7 +459,6 @@ class Encoder(nn.Module):
             n_hidden=n_hidden,
             dropout_rate=dropout_rate,
             use_vampprior = use_vampprior,
-            surgery_comp = surgery_comp,
             **kwargs,
         )
         self.mean_encoder = nn.Linear(n_hidden, n_output)
