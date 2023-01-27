@@ -340,7 +340,7 @@ class FCLayers_encode(nn.Module):
             #save_n_cat_list =  self.n_cat_list
             #self.n_cat_list = []
             one_hot_cat_list = self.surgery_comp
-            if inject_covariates:
+            if self.inject_covariates:
                 save_n_cat_list =  self.n_cat_list.copy()
                 self.n_cat_list = []
                 
