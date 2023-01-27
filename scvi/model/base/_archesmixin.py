@@ -14,7 +14,7 @@ from scvi import REGISTRY_KEYS
 from scvi.data import _constants
 from scvi.data._constants import _MODEL_NAME_KEY, _SETUP_ARGS_KEY
 from scvi.model._utils import parse_use_gpu_arg
-from scvi.nn import FCLayers
+from scvi.nn import FCLayers, FCLayers_encode
 
 from ._base_model import BaseModelClass
 from ._utils import _initialize_model, _load_saved_files, _validate_var_names
@@ -313,7 +313,7 @@ def _set_params_online_update(
         # skip over protected modules
         if key.split(".")[0] in mod_no_hooks_yes_grad:
             continue
-        if isinstance(mod, FCLayers):
+        if isinstance(mod, FCLayers) or isinstance(mod, FCLayers_encode):
             hook_first_layer = False if no_hook_cond(key) else True
             mod.set_online_update_hooks(hook_first_layer)
         if isinstance(mod, torch.nn.Dropout):
