@@ -484,6 +484,7 @@ class VAE(BaseLatentModeModuleClass):
             ## convert input batch_index and categorical_input all equal to zero
             #batch_index_zero = torch.zeros([self.number_vp_components,1])-1
             #batch_index_zero = batch_index_zero.to(device)
+            self.z_encoder.encoder.surgery_comp = self.means_surgery_comp(self.idle_input.to(device))
             q = self.z_encoder.encoder(self.means(self.idle_input.to(device)), use_vampprior = self.use_vampprior, *categorical_input) ## encode distribution of z and z
             
             ## get location parameter
