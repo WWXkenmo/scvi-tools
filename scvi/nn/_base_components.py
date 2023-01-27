@@ -404,8 +404,9 @@ class FCLayers_encode(nn.Module):
                                 one_hot_cat_list_layer = one_hot_cat_list
                                 
                             if use_vampprior:
-                                x = torch.cat((x, one_hot_cat_list_layer), dim=-1)
-                                if self.inject_covariates:
+                                if not self.inject_covariates:
+                                    x = torch.cat((x, one_hot_cat_list_layer), dim=-1)
+                                else:
                                     x = torch.cat((x, *one_hot_cat_list_layer), dim=-1)
                             else:
                                 x = torch.cat((x, *one_hot_cat_list_layer), dim=-1)
