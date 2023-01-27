@@ -43,6 +43,8 @@ class ArchesMixin:
         freeze_classifier: bool = True,
         use_vampprior: bool = True,
         number_vp_components: int = 10,
+        vp_mean: float = 0.1,
+        vp_var: float = 0.02,
     ):
         """
         Online update of a reference model with scArches algorithm :cite:p:`Lotfollahi21`.
@@ -107,7 +109,10 @@ class ArchesMixin:
             allow_missing_labels=True,
             **registry[_SETUP_ARGS_KEY],
         )
-
+        
+        ## set prior equal to vampprior
+        #attr_dict['init_params_']['non_kwargs']['use_vampprior'] = True
+        
         model = _initialize_model(cls, adata, attr_dict)
         adata_manager = model.get_anndata_manager(adata, required=True)
 
@@ -123,7 +128,7 @@ class ArchesMixin:
             )
 
         model.to_device(device)
-
+        
         # model tweaking
         new_state_dict = model.module.state_dict()
         for key, load_ten in load_state_dict.items():
@@ -150,7 +155,21 @@ class ArchesMixin:
             freeze_classifier=freeze_classifier,
         )
         model.is_trained_ = False
-
+        
+        ### Vamp_prior currently only work on scVI model
+        class_Name = str(model.__class__).replace("'>","")
+        class_Name = class_Name.split(".")[3]
+        if class_Name == "SCVI" and use_vampprior:
+            model.module.use_vampprior = True
+            model.module.number_vp_components = number_vp_components
+            surgery_number = model.module.z_encoder.encoder.fc_layers[0][0].in_features - model.module.n_input_feature
+            model.module.add_pseudoinputs(model.module.n_input_feature,surgery_number,mean = vp_mean, var = vp_var)
+            ### regenerate the summary string
+            model._model_summary_string = model._model_summary_string.replace("use_VamPprior: False","use_VamPprior: True")
+            strr = "n_vp_comp: "+str(number_vp_components)
+            model._model_summary_string = model._model_summary_string.replace("n_vp_comp: 10",strr)
+        
+        model.to_device(device)
         return model
 
     @staticmethod
