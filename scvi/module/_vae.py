@@ -394,7 +394,8 @@ class VAE(BaseLatentModeModuleClass):
             z_q_logvar = self.z_encoder.var_encoder(q)
             z = reparameterize(z_q_mean,z_q_logvar)
             i_outputs = dict(z=z, qz=qz, ql=ql, library=library,z_q_mean = z_q_mean,z_q_logvar = z_q_logvar)
-        else:
+        
+        if self.use_metaprior and self.use_vampprior == False:
             i_outputs = dict(z=z, qz=qz, ql=ql, library=library) ## 当n_sample > 1的时候，此时z和library都是从q分布中sample出来的，且z进行了z-score transformation
         return i_outputs
 
