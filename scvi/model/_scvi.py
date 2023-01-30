@@ -150,6 +150,7 @@ class SCVI(
             library_log_means=library_log_means,
             library_log_vars=library_log_vars,
             use_vampprior = use_vampprior,
+            use_metaprior = use_metaprior,
             number_vp_components = number_vp_components,
             **model_kwargs,
         )
@@ -166,7 +167,7 @@ class SCVI(
             gene_likelihood,
             latent_distribution,
             use_vampprior,
-            use_metaPrior,
+            use_metaprior,
             number_vp_components,
         )
         self.init_params_ = self._get_init_params(locals())
