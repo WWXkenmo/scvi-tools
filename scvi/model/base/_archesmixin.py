@@ -379,7 +379,7 @@ def _load_meta_ref_prior(
     batch = next(iter(ref_model._make_data_loader(adata = adata, batch_size = adata.shape[0])))
 
     ## build PCA matrix
-    U, s, _ = pca(batch["X"], k=K)
+    U, s, _ = pca(batch["X"].numpy(), k=K)
     emb = U[:,:K] * s[:K]
 
     ## sampling one reference
