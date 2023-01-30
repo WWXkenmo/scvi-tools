@@ -15,11 +15,11 @@ from scvi.data import _constants
 from scvi.data._constants import _MODEL_NAME_KEY, _SETUP_ARGS_KEY
 from scvi.model._utils import parse_use_gpu_arg
 from scvi.nn import FCLayers, FCLayers_encode
+import scvi
 
 from ._base_model import BaseModelClass
 from ._utils import _initialize_model, _load_saved_files, _validate_var_names
 
-from scvi.model.SCVI import load
 from geosketch import gs
 from fbpca import pca
 
@@ -198,7 +198,7 @@ class ArchesMixin:
     ):
         ## import reference model
         model.module.use_metaprior = True
-        ref_model = load(ref_model_dict, reference_model, use_gpu = True)
+        ref_model = scvi.model.SCVI.load(ref_model_dict, reference_model, use_gpu = True)
         batch = next(iter(ref_model._make_data_loader(adata = ref_model, batch_size = ref_model.shape[0])))
         
         ## build PCA matrix
