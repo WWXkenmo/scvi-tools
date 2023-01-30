@@ -258,7 +258,7 @@ class VAE(BaseLatentModeModuleClass):
         self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)    
 
     def mixture_weight_net(self,n_input):
-        self.pi_net = FCLayers(self,n_input,self.number_vp_components,activation_fn = nn.Softmax)
+        self.pi_net = FCLayers(n_input,self.number_vp_components,activation_fn = nn.Softmax)
 
     def _get_inference_input(
         self,
