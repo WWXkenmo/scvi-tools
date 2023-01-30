@@ -122,6 +122,7 @@ class VAE(BaseLatentModeModuleClass):
         library_log_vars: Optional[np.ndarray] = None,
         var_activation: Optional[Callable] = None,
         use_vampprior: bool = False,
+        use_metaprior: bool = False
         number_vp_components: Tunable[int] = 10,
         vp_mean: Tunable[float] = 0.1,
         vp_var: Tunable[float] = 0.02,
@@ -252,7 +253,10 @@ class VAE(BaseLatentModeModuleClass):
             self.means = FCLayers(self.number_vp_components, n_input1+n_input2,bias = False, use_batch_norm = False, dropout_rate = 0)
             self.means.fc_layers[0][0].weight.data.normal_(mean,var)
         
-        self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)        
+        self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)    
+
+    def mixture_weight_net(self,n_input):
+        self.pi_net = FCLayers(self,n_input,self.number_vp_components,activation_fn: nn.Module = nn.Softmax)
 
     def _get_inference_input(
         self,
@@ -369,7 +373,19 @@ class VAE(BaseLatentModeModuleClass):
                 )
             else:
                 library = ql.sample((n_samples,))
-        
+
+        if self.metaref_prior and self.use_vampprior:
+            aise ValueError("Model should use one type of Vamp-prior")
+
+        if self.metaref_prior:
+            ## encode the mixture weight
+            w = self.module.mixture_weight_net(encoder_input)
+            q = self.z_encoder.encoder(encoder_input, False, batch_index, *categorical_input)
+            z_q_mean = self.z_encoder.mean_encoder(q)
+            z_q_logvar = self.z_encoder.var_encoder(q)
+            z = reparameterize(z_q_mean,z_q_logvar)
+            i_outputs = dict(z=z, qz=qz, ql=ql, library=library,z_q_mean = z_q_mean,z_q_logvar = z_q_logvar, mixture_weight=w)
+
         if self.use_vampprior:
             q = self.z_encoder.encoder(encoder_input, False, batch_index, *categorical_input)
             z_q_mean = self.z_encoder.mean_encoder(q)
@@ -492,17 +508,35 @@ class VAE(BaseLatentModeModuleClass):
             if self.inject_covariates:
                 self.z_encoder.encoder.surgery_comp = self.means_surgery_comp(self.idle_input.to(device))
             q = self.z_encoder.encoder(self.means(self.idle_input.to(device)), use_vampprior = self.use_vampprior, *categorical_input) ## encode distribution of z and z
-                
             
-            ## get location parameter
-            z_p_mean = self.z_encoder.mean_encoder(q)
-            z_p_logvar = self.z_encoder.var_encoder(q)
             g_outputs = dict(
             px=px,
             pl=pl,
             z_p_mean = z_p_mean,
             z_p_logvar = z_p_logvar,
             )
+
+        if self.use_metaprior:
+            device = self.device
+            categorical_input = tuple()
+            batch_index = self.metaref_prior["batch"]
+            ## encode the meta cells to build base components
+            meta_x = self.metaref_prior["X"]
+            if self.log_variational:
+                meta_x = torch.log(1+meta_x)
+            q = self.z_encoder.encoder(meta_x, use_vampprior = False, batch_index, *categorical_input) ## encode distribution of z and z
+            ## get location parameter
+            z_p_mean = self.z_encoder.mean_encoder(q)
+            z_p_logvar = self.z_encoder.var_encoder(q)
+
+            ## encode the mixture weight
+            g_outputs = dict(
+            px=px,
+            pl=pl,
+            z_p_mean = z_p_mean,
+            z_p_logvar = z_p_logvar,
+            )
+
         else:
             pz = Normal(torch.zeros_like(z), torch.ones_like(z)) ## 这里的prior是standard multivariate distribution，需要改成VampPrior的部分   
             g_outputs = dict(
@@ -520,21 +554,36 @@ class VAE(BaseLatentModeModuleClass):
         z_q_logvar = inference_outputs["z_q_logvar"]
         z_p_mean = generative_outputs["z_p_mean"]
         z_p_logvar = generative_outputs["z_p_logvar"]
-        
-        log_q_z = log_Normal_diag(z, z_q_mean, z_q_logvar, dim=1)
 
-        z_expand = z.unsqueeze(1)
-        means = z_p_mean.unsqueeze(0)
-        logvars = z_p_logvar.unsqueeze(0)
+        if "mixture_weight" in list(inference_outputs.keys()):
+            w = inference_outputs["mixture_weight"]
+            log_q_z = log_Normal_diag(z, z_q_mean, z_q_logvar, dim=1)
+            
+            z_expand = z.unsqueeze(1)
+            means = z_p_mean.unsqueeze(0)
+            logvars = z_p_logvar.unsqueeze(0)
 
-        a = log_Normal_diag(z_expand, means, logvars, dim=2) - math.log(self.number_vp_components)  # MB x C
-        a_max, _ = torch.max(a, 1)  # MB x 1
+            a = log_Normal_diag(z_expand, means, logvars, dim=2) - math.log(self.number_vp_components)  # MB x C
+            a_max, _ = torch.max(a, 1)  # MB x 1
 
-        # calculte log-sum-exp
-        log_p_z = a_max + torch.log(torch.sum(torch.exp(a - a_max.unsqueeze(1)), 1))  # MB x 1
+            # calculte log-sum-exp
+            log_p_z = a_max + torch.log(torch.sum(torch.exp(a*w - a_max.unsqueeze(1)), 1))  # MB x 1
+
+        else:
+            log_q_z = log_Normal_diag(z, z_q_mean, z_q_logvar, dim=1)
+
+            z_expand = z.unsqueeze(1)
+            means = z_p_mean.unsqueeze(0)
+            logvars = z_p_logvar.unsqueeze(0)
+
+            a = log_Normal_diag(z_expand, means, logvars, dim=2) - math.log(self.number_vp_components)  # MB x C
+            a_max, _ = torch.max(a, 1)  # MB x 1
+
+            # calculte log-sum-exp
+            log_p_z = a_max + torch.log(torch.sum(torch.exp(a - a_max.unsqueeze(1)), 1))  # MB x 1
         
         KL = -(log_p_z - log_q_z)
-
+        
         return KL,log_p_z, log_q_z
 
     def loss(
