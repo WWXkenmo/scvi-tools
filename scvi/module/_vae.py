@@ -572,7 +572,7 @@ class VAE(BaseLatentModeModuleClass):
             a_max, _ = torch.max(a, 1)  # MB x 1
 
             # calculte log-sum-exp
-            log_p_z = a_max + torch.log(torch.sum(torch.exp(a*w - a_max.unsqueeze(1)), 1))  # MB x 1
+            log_p_z = a_max + torch.log(torch.sum(torch.exp(a - a_max.unsqueeze(1)), 1))  # MB x 1
 
         else:
             log_q_z = log_Normal_diag(z, z_q_mean, z_q_logvar, dim=1)
