@@ -525,7 +525,7 @@ class VAE(BaseLatentModeModuleClass):
             meta_x = self.metaref_prior["X"]
             if self.log_variational:
                 meta_x = torch.log(1+meta_x)
-            q = self.z_encoder.encoder(meta_x, use_vampprior = False, batch_index, *categorical_input) ## encode distribution of z and z
+            q = self.z_encoder.encoder(meta_x, False, batch_index, *categorical_input) ## encode distribution of z and z
             ## get location parameter
             z_p_mean = self.z_encoder.mean_encoder(q)
             z_p_logvar = self.z_encoder.var_encoder(q)
