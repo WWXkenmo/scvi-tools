@@ -376,7 +376,7 @@ class VAE(BaseLatentModeModuleClass):
                 library = ql.sample((n_samples,))
 
         if self.metaref_prior and self.use_vampprior:
-            aise ValueError("Model should use one type of Vamp-prior")
+            raise ValueError("Model should use one type of Vamp-prior")
 
         if self.metaref_prior:
             ## encode the mixture weight
