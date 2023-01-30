@@ -19,7 +19,7 @@ from scvi.nn import FCLayers, FCLayers_encode
 from ._base_model import BaseModelClass
 from ._utils import _initialize_model, _load_saved_files, _validate_var_names
 
-import scvi.model.SCVI.load as load
+from scvi.model.SCVI import load
 from geosketch import gs
 from fbpca import pca
 
