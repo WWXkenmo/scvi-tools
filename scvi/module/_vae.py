@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import math
 import torch.nn.functional as F
+from torch import nn
 from torch import logsumexp
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
@@ -122,7 +123,7 @@ class VAE(BaseLatentModeModuleClass):
         library_log_vars: Optional[np.ndarray] = None,
         var_activation: Optional[Callable] = None,
         use_vampprior: bool = False,
-        use_metaprior: bool = False
+        use_metaprior: bool = False,
         number_vp_components: Tunable[int] = 10,
         vp_mean: Tunable[float] = 0.1,
         vp_var: Tunable[float] = 0.02,
