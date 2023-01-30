@@ -19,6 +19,10 @@ from scvi.nn import FCLayers, FCLayers_encode
 from ._base_model import BaseModelClass
 from ._utils import _initialize_model, _load_saved_files, _validate_var_names
 
+import scvi.model.SCVI.load as load
+from geosketch import gs
+from fbpca import pca
+
 logger = logging.getLogger(__name__)
 
 MIN_VAR_NAME_RATIO = 0.8
@@ -41,7 +45,8 @@ class ArchesMixin:
         freeze_batchnorm_encoder: bool = True,
         freeze_batchnorm_decoder: bool = False,
         freeze_classifier: bool = True,
-        use_vampprior: bool = True,
+        use_vampprior: bool = False,
+        use_metaprior: bool = False,
         number_vp_components: int = 10,
         vp_mean: float = 0.1,
         vp_var: float = 0.02,
@@ -159,6 +164,9 @@ class ArchesMixin:
         ### Vamp_prior currently only work on scVI model
         class_Name = str(model.__class__).replace("'>","")
         class_Name = class_Name.split(".")[3]
+        if use_vampprior and use_metaprior:
+            raise ValueError("Model should use one type of Vamp-prior")
+
         if class_Name == "SCVI" and use_vampprior:
             model.module.use_vampprior = True
             model.module.number_vp_components = number_vp_components
@@ -168,9 +176,51 @@ class ArchesMixin:
             model._model_summary_string = model._model_summary_string.replace("use_VamPprior: False","use_VamPprior: True")
             strr = "n_vp_comp: "+str(number_vp_components)
             model._model_summary_string = model._model_summary_string.replace("n_vp_comp: 10",strr)
-        
+        if class_Name = "SCVI" and use_metaprior:
+            model.module.number_vp_components = number_vp_components
+            model.module.mixture_weight_net(model.module.n_input_feature)
+            model = load_meta_ref_prior(model,adata,reference_model,K = n_pcs, N = number_vp_components)
+            ### regenerate the summary string
+            model._model_summary_string = model._model_summary_string.replace("use_metaPrior: False","use_metaPrior: True")
+            strr = "n_vp_comp: "+str(number_vp_components)
+            model._model_summary_string = model._model_summary_string.replace("n_vp_comp: 10",strr)
+
         model.to_device(device)
         return model
+
+    def load_meta_ref_prior(
+        model: Union[str, BaseModelClass],
+        adata: AnnData,
+        reference_model: Union[str, BaseModelClass],
+        K: int = 20, 
+        N: int = 50,
+    ):
+        ## import reference model
+        model.module.use_metaprior = True
+        ref_model = load(ref_model_dict, reference_model, use_gpu = True)
+        batch = next(iter(ref_model._make_data_loader(adata = ref_model, batch_size = ref_model.shape[0])))
+        
+        ## build PCA matrix
+        U, s, _ = pca(batch["X"], k=K)
+        emb = U[:,:K] * s[:K]
+
+        ## sampling one reference
+        sketch_index = gs(emb, N, replace=False)
+        del emb
+        ## output batch
+        batch['X'] = batch['X'][sketch_index]
+        batch['batch'] = batch['batch'][sketch_index]
+        batch['labels'] = batch['labels'][sketch_index]
+
+        del ref_model
+        ## The required inform for
+        model.module.metaref_prior = batch
+
+        ## build a FCLayers to predict the mixture weights for each latent components
+        
+        
+        return model
+
 
     @staticmethod
     def prepare_query_anndata(
@@ -345,3 +395,4 @@ def _get_loaded_data(reference_model, device=None):
         load_state_dict = deepcopy(reference_model.module.state_dict())
 
     return attr_dict, var_names, load_state_dict
+
