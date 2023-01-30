@@ -180,46 +180,13 @@ class ArchesMixin:
         if class_Name == "SCVI" and use_metaprior:
             model.module.number_vp_components = number_vp_components
             model.module.mixture_weight_net(model.module.n_input_feature)
-            model = load_meta_ref_prior(model,adata,reference_model,K = n_pcs, N = number_vp_components)
+            model = _load_meta_ref_prior(model,adata,reference_model,K = n_pcs, N = number_vp_components)
             ### regenerate the summary string
             model._model_summary_string = model._model_summary_string.replace("use_metaPrior: False","use_metaPrior: True")
             strr = "n_vp_comp: "+str(number_vp_components)
             model._model_summary_string = model._model_summary_string.replace("n_vp_comp: 10",strr)
 
         model.to_device(device)
-        return model
-
-    def load_meta_ref_prior(
-        model: Union[str, BaseModelClass],
-        adata: AnnData,
-        reference_model: Union[str, BaseModelClass],
-        K: int = 20, 
-        N: int = 50,
-    ):
-        ## import reference model
-        model.module.use_metaprior = True
-        ref_model = scvi.model.SCVI.load(ref_model_dict, reference_model, use_gpu = True)
-        batch = next(iter(ref_model._make_data_loader(adata = ref_model, batch_size = ref_model.shape[0])))
-        
-        ## build PCA matrix
-        U, s, _ = pca(batch["X"], k=K)
-        emb = U[:,:K] * s[:K]
-
-        ## sampling one reference
-        sketch_index = gs(emb, N, replace=False)
-        del emb
-        ## output batch
-        batch['X'] = batch['X'][sketch_index]
-        batch['batch'] = batch['batch'][sketch_index]
-        batch['labels'] = batch['labels'][sketch_index]
-
-        del ref_model
-        ## The required inform for
-        model.module.metaref_prior = batch
-
-        ## build a FCLayers to predict the mixture weights for each latent components
-        
-        
         return model
 
 
@@ -397,3 +364,36 @@ def _get_loaded_data(reference_model, device=None):
 
     return attr_dict, var_names, load_state_dict
 
+
+def _load_meta_ref_prior(
+    model: Union[str, BaseModelClass],
+    adata: AnnData,
+    reference_model: Union[str, BaseModelClass],
+    K: int = 20, 
+    N: int = 50,
+):
+    ## import reference model
+    model.module.use_metaprior = True
+    ref_model = scvi.model.SCVI.load(ref_model_dict, reference_model, use_gpu = True)
+    batch = next(iter(ref_model._make_data_loader(adata = ref_model, batch_size = ref_model.shape[0])))
+
+    ## build PCA matrix
+    U, s, _ = pca(batch["X"], k=K)
+    emb = U[:,:K] * s[:K]
+
+    ## sampling one reference
+    sketch_index = gs(emb, N, replace=False)
+    del emb
+    ## output batch
+    batch['X'] = batch['X'][sketch_index]
+    batch['batch'] = batch['batch'][sketch_index]
+    batch['labels'] = batch['labels'][sketch_index]
+
+    del ref_model
+    ## The required inform for
+    model.module.metaref_prior = batch
+
+    ## build a FCLayers to predict the mixture weights for each latent components
+
+
+    return model
