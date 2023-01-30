@@ -381,7 +381,7 @@ class VAE(BaseLatentModeModuleClass):
 
         if self.use_metaprior:
             ## encode the mixture weight
-            w = self.module.mixture_weight_net(encoder_input)
+            w = self.pi_net(encoder_input)
             q = self.z_encoder.encoder(encoder_input, False, batch_index, *categorical_input)
             z_q_mean = self.z_encoder.mean_encoder(q)
             z_q_logvar = self.z_encoder.var_encoder(q)
