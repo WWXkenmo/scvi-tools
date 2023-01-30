@@ -47,7 +47,7 @@ class ArchesMixin:
         freeze_classifier: bool = True,
         use_vampprior: bool = False,
         use_metaprior: bool = False,
-        npcs: int = 20,
+        n_pcs: int = 20,
         number_vp_components: int = 10,
         vp_mean: float = 0.1,
         vp_var: float = 0.02,
