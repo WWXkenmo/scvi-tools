@@ -177,7 +177,7 @@ class ArchesMixin:
             model._model_summary_string = model._model_summary_string.replace("use_VamPprior: False","use_VamPprior: True")
             strr = "n_vp_comp: "+str(number_vp_components)
             model._model_summary_string = model._model_summary_string.replace("n_vp_comp: 10",strr)
-        if class_Name = "SCVI" and use_metaprior:
+        if class_Name == "SCVI" and use_metaprior:
             model.module.number_vp_components = number_vp_components
             model.module.mixture_weight_net(model.module.n_input_feature)
             model = load_meta_ref_prior(model,adata,reference_model,K = n_pcs, N = number_vp_components)
