@@ -376,10 +376,10 @@ class VAE(BaseLatentModeModuleClass):
             else:
                 library = ql.sample((n_samples,))
 
-        if self.metaref_prior and self.use_vampprior:
+        if self.use_metaprior and self.use_vampprior:
             raise ValueError("Model should use one type of Vamp-prior")
 
-        if self.metaref_prior:
+        if self.use_metaprior:
             ## encode the mixture weight
             w = self.module.mixture_weight_net(encoder_input)
             q = self.z_encoder.encoder(encoder_input, False, batch_index, *categorical_input)
