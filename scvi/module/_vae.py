@@ -184,6 +184,7 @@ class VAE(BaseLatentModeModuleClass):
 
         ### add vamp prior
         self.use_vampprior = use_vampprior
+        self.use_metaprior = use_metaprior
         self.number_vp_components = number_vp_components
         if self.use_vampprior:
             self.add_pseudoinputs(n_input_encoder,sum(encode_cat_list),vp_mean,vp_var)
