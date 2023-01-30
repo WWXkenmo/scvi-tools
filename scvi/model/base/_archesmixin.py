@@ -35,6 +35,7 @@ class ArchesMixin:
     def load_query_data(
         cls,
         adata: AnnData,
+        ref_adata: AnnData,
         reference_model: Union[str, BaseModelClass],
         inplace_subset_query_vars: bool = False,
         use_gpu: Optional[Union[str, int, bool]] = None,
@@ -180,7 +181,7 @@ class ArchesMixin:
         if class_Name == "SCVI" and use_metaprior:
             model.module.number_vp_components = number_vp_components
             model.module.mixture_weight_net(model.module.n_input_feature)
-            model = _load_meta_ref_prior(model,adata,reference_model,K = n_pcs, N = number_vp_components)
+            model = _load_meta_ref_prior(model,ref_adata,reference_model,K = n_pcs, N = number_vp_components)
             ### regenerate the summary string
             model._model_summary_string = model._model_summary_string.replace("use_metaPrior: False","use_metaPrior: True")
             strr = "n_vp_comp: "+str(number_vp_components)
@@ -374,7 +375,7 @@ def _load_meta_ref_prior(
 ):
     ## import reference model
     model.module.use_metaprior = True
-    ref_model = scvi.model.SCVI.load(ref_model_dict, reference_model, use_gpu = True)
+    ref_model = scvi.model.SCVI.load(reference_model,adata, use_gpu = True)
     batch = next(iter(ref_model._make_data_loader(adata = ref_model, batch_size = ref_model.shape[0])))
 
     ## build PCA matrix
