@@ -376,7 +376,7 @@ def _load_meta_ref_prior(
     ## import reference model
     model.module.use_metaprior = True
     ref_model = scvi.model.SCVI.load(reference_model,adata, use_gpu = True)
-    batch = next(iter(ref_model._make_data_loader(adata = ref_model, batch_size = ref_model.shape[0])))
+    batch = next(iter(ref_model._make_data_loader(adata = adata, batch_size = adata.shape[0])))
 
     ## build PCA matrix
     U, s, _ = pca(batch["X"], k=K)
