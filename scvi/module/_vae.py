@@ -547,7 +547,7 @@ class VAE(BaseLatentModeModuleClass):
             z_p_logvar = z_p_logvar,
             )
 
-        else:
+        if (self.use_metaprior or self.use_vampprior) == False:
             pz = Normal(torch.zeros_like(z), torch.ones_like(z)) ## 这里的prior是standard multivariate distribution，需要改成VampPrior的部分   
             g_outputs = dict(
             px=px,
