@@ -702,7 +702,7 @@ class VAE(BaseLatentModeModuleClass):
             reconst_loss = losses.dict_sum(losses.reconstruction_loss)
 
             # Log-probabilities
-            if self.use_vampprior:
+            if self.use_vampprior or self.use_metaprior:
                 kl_divergence_z,p_z, q_z_x = self.vp_kl(inference_outputs, generative_outputs)
             else:
                 p_z = (
