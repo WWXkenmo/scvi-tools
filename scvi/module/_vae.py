@@ -513,6 +513,9 @@ class VAE(BaseLatentModeModuleClass):
             if self.inject_covariates:
                 self.z_encoder.encoder.surgery_comp = self.means_surgery_comp(self.idle_input.to(device))
             q = self.z_encoder.encoder(self.means(self.idle_input.to(device)), use_vampprior = self.use_vampprior, *categorical_input) ## encode distribution of z and z
+            ## get location parameter
+            z_p_mean = self.z_encoder.mean_encoder(q)
+            z_p_logvar = self.z_encoder.var_encoder(q)
             
             g_outputs = dict(
             px=px,
