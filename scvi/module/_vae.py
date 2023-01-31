@@ -585,7 +585,7 @@ class VAE(BaseLatentModeModuleClass):
             a_max, _ = torch.max(a, 1)  # MB x 1
 
             # calculte log-sum-exp
-            log_p_z = a_max + torch.log(torch.sum(torch.exp(a - a_max.unsqueeze(1)), 1))  # MB x 1
+            log_p_z = a_max + torch.log(torch.sum(torch.exp(a - a_max.unsqueeze(1))*w, 1))  # MB x 1
         
         KL = -(log_p_z - log_q_z)
         
