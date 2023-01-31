@@ -258,7 +258,7 @@ class VAE(BaseLatentModeModuleClass):
         self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)    
 
     def mixture_weight_net(self,n_input):
-        self.pi_net = FCLayers(n_input,self.number_vp_components,activation_fn = nn.Softmax(dim=1))
+        self.pi_net = FCLayers(n_input,self.number_vp_components,use_activation = False)
 
     def _get_inference_input(
         self,
@@ -382,6 +382,8 @@ class VAE(BaseLatentModeModuleClass):
         if self.use_metaprior:
             ## encode the mixture weight
             w = self.pi_net(encoder_input)
+            smf = nn.Softmax(dim=1)
+            w = smf(w)
             q = self.z_encoder.encoder(encoder_input, False, batch_index, *categorical_input)
             z_q_mean = self.z_encoder.mean_encoder(q)
             z_q_logvar = self.z_encoder.var_encoder(q)
