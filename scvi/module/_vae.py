@@ -561,7 +561,7 @@ class VAE(BaseLatentModeModuleClass):
         z_p_logvar = generative_outputs["z_p_logvar"]
 
         if "mixture_weight" in list(inference_outputs.keys()):
-            w = inference_outputs["mixture_weight"]
+            w = inference_outputs["mixture_weight"]+10^-3
             log_q_z = log_Normal_diag(z, z_q_mean, z_q_logvar, dim=1)
             
             z_expand = z.unsqueeze(1)
@@ -572,7 +572,7 @@ class VAE(BaseLatentModeModuleClass):
             a_max, _ = torch.max(a, 1)  # MB x 1
 
             # calculte log-sum-exp
-            log_p_z = a_max + torch.log(torch.sum(torch.exp(a - a_max.unsqueeze(1)), 1))  # MB x 1
+            log_p_z = a_max + torch.log(torch.sum(torch.exp(a - a_max.unsqueeze(1))*w, 1))  # MB x 1
 
         else:
             log_q_z = log_Normal_diag(z, z_q_mean, z_q_logvar, dim=1)
