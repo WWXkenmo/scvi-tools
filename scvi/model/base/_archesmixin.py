@@ -47,6 +47,7 @@ class ArchesMixin:
         freeze_batchnorm_decoder: bool = False,
         freeze_classifier: bool = True,
         freeze_mean_var_express: bool = True,
+        off_surgery_comp: bool = False,
         use_vampprior: bool = False,
         use_metaprior: bool = False,
         n_pcs: int = 20,
@@ -188,6 +189,13 @@ class ArchesMixin:
             model._model_summary_string = model._model_summary_string.replace("use_metaPrior: False","use_metaPrior: True")
             strr = "n_vp_comp: "+str(number_vp_components)
             model._model_summary_string = model._model_summary_string.replace("n_vp_comp: 10",strr)
+        
+        if class_Name == "SCVI" and use_vampprior and off_surgery_comp:
+            for key, par in model.module.named_parameters():
+                if "means_surgery_comp" in key:
+                    device = par.data.device
+                    par.data = torch.zeros(par.data.shape).to(device)
+                    par.requires_grad = False
 
         model.to_device(device)
         return model
