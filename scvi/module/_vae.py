@@ -187,7 +187,7 @@ class VAE(BaseLatentModeModuleClass):
         self.use_metaprior = use_metaprior
         self.number_vp_components = number_vp_components
         if self.use_vampprior:
-            self.add_pseudoinputs(n_input_encoder,sum(encode_cat_list),vp_mean,vp_var)
+            self.add_pseudoinputs(n_input_encoder,sum(encoder_cat_list),vp_mean,vp_var)
             surgery_comp = self.means_surgery_comp(self.idle_input.to(self.device))
         else:
             surgery_comp = None
