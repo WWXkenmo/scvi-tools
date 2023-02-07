@@ -248,8 +248,9 @@ class VAE(BaseLatentModeModuleClass):
             self.means = FCLayers(self.number_vp_components, n_input1,bias = False, use_batch_norm = False, dropout_rate = 0)
             #normal_init(self.means.linear, self.args.pseudoinputs_mean, self.args.pseudoinputs_std)
             self.means.fc_layers[0][0].weight.data.normal_(mean,var)
-
-            self.means_surgery_comp = FCLayers(self.number_vp_components, n_input2,bias = False, use_batch_norm = False, dropout_rate = 0, activation_fn = nn.Hardtanh(min_val=0.0, max_val=1.0))
+            
+            self.nonlinearity = nn.Hardtanh(min_val=0.0, max_val=1.0)
+            self.means_surgery_comp = FCLayers(self.number_vp_components, n_input2,bias = False, use_batch_norm = False, dropout_rate = 0, use_activation = False)
             #normal_init(self.means.linear, self.args.pseudoinputs_mean, self.args.pseudoinputs_std)
             self.means_surgery_comp.fc_layers[0][0].weight.data.normal_(mean,var)
         else:
@@ -512,7 +513,7 @@ class VAE(BaseLatentModeModuleClass):
             #batch_index_zero = torch.zeros([self.number_vp_components,1])-1
             #batch_index_zero = batch_index_zero.to(device)
             if self.inject_covariates:
-                self.z_encoder.encoder.surgery_comp = self.means_surgery_comp(self.idle_input.to(device))
+                self.z_encoder.encoder.surgery_comp = self.nonlinearity(self.means_surgery_comp(self.idle_input.to(device)))
             q = self.z_encoder.encoder(self.means(self.idle_input.to(device)), use_vampprior = self.use_vampprior, *categorical_input) ## encode distribution of z and z
             ## get location parameter
             z_p_mean = self.z_encoder.mean_encoder(q)
