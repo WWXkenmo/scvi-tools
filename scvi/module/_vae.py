@@ -190,9 +190,9 @@ class VAE(BaseLatentModeModuleClass):
         
         if self.use_vampprior:
             self.add_pseudoinputs(n_input_encoder,sum(encoder_cat_list),vp_mean,vp_var)
-            surgery_comp = self.means_surgery_comp(self.idle_input.to(self.device))
-        else:
-            surgery_comp = None
+            #surgery_comp = self.means_surgery_comp(self.idle_input.to(self.device))
+        #else:
+            #surgery_comp = None
             
         self.z_encoder = Encoder(
             n_input_encoder,
