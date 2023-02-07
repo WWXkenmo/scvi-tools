@@ -186,6 +186,8 @@ class VAE(BaseLatentModeModuleClass):
         self.use_vampprior = use_vampprior
         self.use_metaprior = use_metaprior
         self.number_vp_components = number_vp_components
+        self.inject_covariates = deeply_inject_covariates
+        
         if self.use_vampprior:
             self.add_pseudoinputs(n_input_encoder,sum(encoder_cat_list),vp_mean,vp_var)
             surgery_comp = self.means_surgery_comp(self.idle_input.to(self.device))
@@ -234,7 +236,6 @@ class VAE(BaseLatentModeModuleClass):
             use_layer_norm=use_layer_norm_decoder,
             scale_activation="softplus" if use_size_factor_key else "softmax",
         )
-        self.inject_covariates = deeply_inject_covariates
 
         ### add vamp prior
         #self.use_vampprior = use_vampprior
