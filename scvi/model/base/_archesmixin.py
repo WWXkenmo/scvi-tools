@@ -46,6 +46,7 @@ class ArchesMixin:
         freeze_batchnorm_encoder: bool = True,
         freeze_batchnorm_decoder: bool = False,
         freeze_classifier: bool = True,
+        freeze_mean_var_express: bool = True,
         use_vampprior: bool = False,
         use_metaprior: bool = False,
         n_pcs: int = 20,
@@ -160,6 +161,7 @@ class ArchesMixin:
             freeze_dropout=freeze_dropout,
             freeze_expression=freeze_expression,
             freeze_classifier=freeze_classifier,
+            freeze_mean_var_express = freeze_mean_var_express,
         )
         model.is_trained_ = False
         
@@ -286,6 +288,7 @@ def _set_params_online_update(
     freeze_dropout,
     freeze_expression,
     freeze_classifier,
+    freeze_mean_var_express,
 ):
     """Freeze parts of network for scArches."""
     # do nothing if unfrozen
@@ -323,6 +326,8 @@ def _set_params_online_update(
             and "decoder" in key
             and (not freeze_batchnorm_decoder)
         )
+        if not freeze_mean_var_express and ("mean_encoder" in key or "var_encoder" in key):
+            return True
         if one or two or three or four or five:
             return True
         else:
