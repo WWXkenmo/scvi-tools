@@ -245,15 +245,15 @@ class VAE(BaseLatentModeModuleClass):
 
     def add_pseudoinputs(self,n_input1,n_input2,mean,var):
         if self.inject_covariates:
-            self.means = FCLayers(self.number_vp_components, n_input1,bias = False, use_batch_norm = False, dropout_rate = 0)
+            self.means = FCLayers(self.number_vp_components, n_input1,bias = False, use_batch_norm = True, dropout_rate = 0)
             #normal_init(self.means.linear, self.args.pseudoinputs_mean, self.args.pseudoinputs_std)
             self.means.fc_layers[0][0].weight.data.normal_(mean,var)
 
-            self.means_surgery_comp = FCLayers(self.number_vp_components, n_input2,bias = False, use_batch_norm = False, dropout_rate = 0)
+            self.means_surgery_comp = FCLayers(self.number_vp_components, n_input2,bias = False, use_batch_norm = True, dropout_rate = 0)
             #normal_init(self.means.linear, self.args.pseudoinputs_mean, self.args.pseudoinputs_std)
             self.means_surgery_comp.fc_layers[0][0].weight.data.normal_(mean,var)
         else:
-            self.means = FCLayers(self.number_vp_components, n_input1+n_input2,bias = False, use_batch_norm = False, dropout_rate = 0)
+            self.means = FCLayers(self.number_vp_components, n_input1+n_input2,bias = False, use_batch_norm = True, dropout_rate = 0)
             self.means.fc_layers[0][0].weight.data.normal_(mean,var)
         
         self.idle_input = Variable(torch.eye(self.number_vp_components,self.number_vp_components), requires_grad = False)    
