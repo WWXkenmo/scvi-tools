@@ -142,7 +142,7 @@ class ArchesMixin:
         new_state_dict = model.module.state_dict()
         for key, load_ten in load_state_dict.items():
             new_ten = new_state_dict[key]
-            if new_ten.size() == load_ten.size():
+            if (new_ten.size() == load_ten.size()) or ('means_surgery_comp' in key or 'means' in key):
                 continue
             # new categoricals changed size
             else:
