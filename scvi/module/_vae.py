@@ -391,7 +391,7 @@ class VAE(BaseLatentModeModuleClass):
             z_q_logvar = self.z_encoder.var_encoder(q)
             #z = reparameterize(z_q_mean,z_q_logvar)
             q_v = torch.exp(z_q_logvar) + 1e-4
-            dist = Normal(z_q_m, q_v.sqrt())
+            dist = Normal(z_q_mean, q_v.sqrt())
             z = dist.rsample()
             i_outputs = dict(z=z, qz=qz, ql=ql, library=library,z_q_mean = z_q_mean,z_q_logvar = z_q_logvar, mixture_weight=w)
 
@@ -401,7 +401,7 @@ class VAE(BaseLatentModeModuleClass):
             z_q_logvar = self.z_encoder.var_encoder(q)
             #z = reparameterize(z_q_mean,z_q_logvar)
             q_v = torch.exp(z_q_logvar) + 1e-4
-            dist = Normal(z_q_m, q_v.sqrt())
+            dist = Normal(z_q_mean, q_v.sqrt())
             z = dist.rsample()
             i_outputs = dict(z=z, qz=qz, ql=ql, library=library,z_q_mean = z_q_mean,z_q_logvar = z_q_logvar)
         
