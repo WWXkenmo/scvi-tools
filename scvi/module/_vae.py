@@ -389,14 +389,20 @@ class VAE(BaseLatentModeModuleClass):
             q = self.z_encoder.encoder(encoder_input, False, batch_index, *categorical_input)
             z_q_mean = self.z_encoder.mean_encoder(q)
             z_q_logvar = self.z_encoder.var_encoder(q)
-            z = reparameterize(z_q_mean,z_q_logvar)
+            #z = reparameterize(z_q_mean,z_q_logvar)
+            q_v = torch.exp(z_q_logvar) + 1e-4
+            dist = Normal(q_m, q_v.sqrt())
+            z = dist.rsample()
             i_outputs = dict(z=z, qz=qz, ql=ql, library=library,z_q_mean = z_q_mean,z_q_logvar = z_q_logvar, mixture_weight=w)
 
         if self.use_vampprior:
             q = self.z_encoder.encoder(encoder_input, False, batch_index, *categorical_input)
             z_q_mean = self.z_encoder.mean_encoder(q)
             z_q_logvar = self.z_encoder.var_encoder(q)
-            z = reparameterize(z_q_mean,z_q_logvar)
+            #z = reparameterize(z_q_mean,z_q_logvar)
+            q_v = torch.exp(z_q_logvar) + 1e-4
+            dist = Normal(q_m, q_v.sqrt())
+            z = dist.rsample()
             i_outputs = dict(z=z, qz=qz, ql=ql, library=library,z_q_mean = z_q_mean,z_q_logvar = z_q_logvar)
         
         if (self.use_metaprior or self.use_vampprior) == False:
