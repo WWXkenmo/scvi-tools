@@ -521,7 +521,7 @@ class VAE(BaseLatentModeModuleClass):
             if self.inject_covariates:
                 self.z_encoder.encoder.surgery_comp = self.nonlinearity(self.means_surgery_comp(self.idle_input.to(device)))
                 if self.n_batch == 1:
-                    self.z_encoder.encoder.surgery_comp = None
+                    self.z_encoder.encoder.surgery_comp = torch.tensor([])
             q = self.z_encoder.encoder(self.means(self.idle_input.to(device)), use_vampprior = self.use_vampprior, *categorical_input) ## encode distribution of z and z
             ## get location parameter
             z_p_mean = self.z_encoder.mean_encoder(q)
